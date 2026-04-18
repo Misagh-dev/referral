@@ -1,0 +1,26 @@
+# Database — stays on server only, never in the repo
+ris_database.db
+*.db
+*.sqlite
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Streamlit secrets (if added later)
+.streamlit/secrets.toml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated PDFs (optional — remove this line if you want PDFs tracked)
+*.pdf
