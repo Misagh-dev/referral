@@ -1,0 +1,6 @@
+streamlit==1.56.0
+Authlib==1.6.11
+pandas==3.0.2
+pillow==12.2.0
+reportlab==4.4.10
+requests==2.33.1

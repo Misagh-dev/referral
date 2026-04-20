@@ -1,11 +1,5 @@
 """
-sheets_db.py  —  Phase 1: SQLite local database
-Phase 2: Replace each function body with gspread (Google Sheets) calls.
-
-Google Sheet structure (Phase 2):
-  Tab "Patients"  — one row per patient  (PRIMARY KEY: medicare)
-  Tab "Referrals" — one row per referral (PRIMARY KEY: referral_id)
-  Tab "Doctors"   — one row per doctor   (PRIMARY KEY: doctor_id)
+sheets_db.py  —  Radiology2u RIS data layer (SQLite)
 """
 
 import os
@@ -16,18 +10,6 @@ from datetime import datetime
 # ── Database path (same directory as this file) ───────────────────────────────
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ris_database.db")
 
-# ── Phase 2 setup (uncomment and fill in when ready) ─────────────────────────
-# import gspread
-# from google.oauth2.service_account import Credentials
-# _SCOPES     = ["https://www.googleapis.com/auth/spreadsheets"]
-# _CREDS_FILE = "credentials.json"
-# _SHEET_NAME = "EReferral_DB"
-#
-# def _get_sheet():
-#     creds  = Credentials.from_service_account_file(_CREDS_FILE, scopes=_SCOPES)
-#     client = gspread.authorize(creds)
-#     return client.open(_SHEET_NAME)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 # ── Modality → 2-4 char code map ────────────────────────────────────────────
@@ -214,14 +196,7 @@ def find_patient_by_medicare(medicare: str) -> dict | None:
 
 
 def register_patient(patient_data: dict) -> str:
-    """
-    Insert a new patient or update existing record (upsert on Medicare number).
-    Returns the patient's Patient ID (stable across updates).
-
-    Phase 2:
-        sheet = _get_sheet().worksheet("Patients")
-        # check existing row, append or update accordingly
-    """
+    """Insert or update a patient record (upsert on Medicare number). Returns the Patient ID."""
     now          = datetime.now().strftime("%d/%m/%Y %H:%M")
     current_year = datetime.now().strftime("%Y")
     medicare_key = patient_data.get("medicare", "").replace(" ", "")
@@ -276,14 +251,7 @@ def register_patient(patient_data: dict) -> str:
 
 
 def create_referral(referral_data: dict) -> str:
-    """
-    Insert a new referral with status = 'Pending'. Silently ignores duplicates.
-    Returns the accession_number for this study.
-
-    Phase 2:
-        sheet = _get_sheet().worksheet("Referrals")
-        sheet.append_row([...])
-    """
+    """Insert a new referral with status = 'Pending'. Returns the accession_number."""
     now              = datetime.now().strftime("%d/%m/%Y %H:%M")
     medicare_key     = referral_data.get("medicare", "").replace(" ", "")
     mod_code         = _MODALITY_CODE.get(referral_data.get("modality", ""), "OTH")
@@ -339,13 +307,9 @@ def get_worklist(
     status: str = "All",
     urgency: str = "All",
     modality: str = "All",
+    status_in: list | None = None,
 ) -> list[dict]:
-    """
-    Return referrals joined with patient names, sorted by clinical urgency then date.
-
-    Phase 2:
-        Fetch both Google Sheet tabs, merge on medicare, filter in Python.
-    """
+    """Return referrals joined with patient names, sorted by clinical urgency then date."""
     query = """
         SELECT
             r.referral_id,
@@ -372,6 +336,10 @@ def get_worklist(
     if status != "All":
         query += " AND r.status = ?"
         params.append(status)
+    elif status_in:
+        placeholders = ",".join("?" * len(status_in))
+        query += f" AND r.status IN ({placeholders})"
+        params.extend(status_in)
     if urgency != "All":
         query += " AND r.urgency = ?"
         params.append(urgency)
@@ -412,14 +380,55 @@ def get_referral_by_id(identifier: str) -> dict | None:
         return dict(row) if row else None
 
 
-def update_referral_status(referral_id: str, status: str) -> None:
+def search_worklist(query: str) -> list[dict]:
     """
-    Update the status column for a given referral.
+    Search referrals by patient first name, surname, DOB, patient ID,
+    Medicare number, or accession number.  Returns the same shape as
+    get_worklist() so the worklist table can render the results directly.
+    """
+    like = f"%{query.strip()}%"
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                r.referral_id,
+                r.accession_number,
+                COALESCE(p.patient_id, '—') AS patient_id,
+                COALESCE(p.lastname || ', ' || p.firstname, '—') AS patient_name,
+                COALESCE(p.dob, '—')  AS dob,
+                r.medicare,
+                r.modality,
+                r.body_region,
+                r.urgency,
+                r.referring_doctor,
+                r.practice,
+                r.referral_date,
+                r.valid_until,
+                r.status,
+                r.allergies,
+                r.date_created
+            FROM referrals r
+            LEFT JOIN patients p ON r.medicare = p.medicare
+            WHERE
+                p.firstname        LIKE ?
+             OR p.lastname         LIKE ?
+             OR p.dob              LIKE ?
+             OR p.patient_id       LIKE ?
+             OR p.medicare         LIKE ?
+             OR r.accession_number LIKE ?
+            ORDER BY
+                CASE r.urgency
+                    WHEN 'Emergency (same day)'         THEN 1
+                    WHEN 'Urgent (within 7 days)'       THEN 2
+                    WHEN 'Semi-urgent (within 30 days)' THEN 3
+                    ELSE 4
+                END,
+                r.referral_date ASC
+        """, (like, like, like, like, like, like)).fetchall()
+        return [dict(r) for r in rows]
 
-    Phase 2:
-        sheet = _get_sheet().worksheet("Referrals")
-        # find row index by referral_id, update status cell
-    """
+
+def update_referral_status(referral_id: str, status: str) -> None:
+    """Update the status column for a given referral."""
     with _conn() as conn:
         conn.execute(
             "UPDATE referrals SET status = ? WHERE referral_id = ?",
@@ -428,14 +437,30 @@ def update_referral_status(referral_id: str, status: str) -> None:
         conn.commit()
 
 
-def search_patients(query: str) -> list[dict]:
-    """
-    Search patients by surname, first name, Medicare number, or Patient ID.
+def update_referral(referral_id: str, fields: dict) -> None:
+    """Update editable fields on an existing referral/visit."""
+    allowed = {
+        "to_clinic", "modality", "body_region", "urgency",
+        "referral_date", "valid_until", "clinical_indication",
+        "relevant_history", "medications", "allergies",
+        "investigations", "special_requirements",
+        "referring_doctor", "provider_number", "practice",
+        "doctor_phone", "doctor_email", "status",
+    }
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    set_clause = ", ".join(f"{col} = ?" for col in updates)
+    with _conn() as conn:
+        conn.execute(
+            f"UPDATE referrals SET {set_clause} WHERE referral_id = ?",
+            (*updates.values(), referral_id),
+        )
+        conn.commit()
 
-    Phase 2:
-        records = _get_sheet().worksheet("Patients").get_all_records()
-        return [r for r in records if query.lower() in ...]
-    """
+
+def search_patients(query: str) -> list[dict]:
+    """Search patients by surname, first name, Medicare number, or Patient ID."""
     like = f"%{query.strip()}%"
     with _conn() as conn:
         rows = conn.execute("""
@@ -463,6 +488,13 @@ def delete_patient(medicare: str) -> None:
         conn.execute("DELETE FROM patients WHERE medicare = ?", (medicare,))
 
 
+def delete_referral(referral_id: str) -> None:
+    """Delete a single referral/visit by its internal referral_id."""
+    with _conn() as conn:
+        conn.execute("DELETE FROM referrals WHERE referral_id = ?", (referral_id,))
+        conn.commit()
+
+
 def get_patient_referrals(medicare: str) -> list[dict]:
     """Return all referrals for a patient (Medicare number), newest first."""
     with _conn() as conn:
@@ -473,18 +505,8 @@ def get_patient_referrals(medicare: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def get_all_referrals() -> list[dict]:
-    """Return all referrals. Kept for backward compatibility."""
-    return get_worklist()
-
-
 def update_patient(medicare: str, patient_data: dict) -> None:
-    """
-    Update an existing patient record by Medicare number.
-
-    Phase 2:
-        Find row by Medicare number in Patients sheet and update all cells.
-    """
+    """Update an existing patient record by Medicare number."""
     with _conn() as conn:
         conn.execute("""
             UPDATE patients SET
@@ -518,13 +540,7 @@ def update_patient(medicare: str, patient_data: dict) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def save_doctor(doctor_data: dict) -> str:
-    """
-    Insert a new doctor record. Returns the generated doctor_id.
-
-    Phase 2:
-        sheet = _get_sheet().worksheet("Doctors")
-        sheet.append_row([doctor_id, ...])
-    """
+    """Insert a new doctor record. Returns the generated doctor_id."""
     doctor_id = str(uuid.uuid4())[:8].upper()
     now = datetime.now().strftime("%d/%m/%Y %H:%M")
     with _conn() as conn:
@@ -554,12 +570,7 @@ def save_doctor(doctor_data: dict) -> str:
 
 
 def update_doctor(doctor_id: str, doctor_data: dict) -> None:
-    """
-    Update an existing doctor record by doctor_id.
-
-    Phase 2:
-        Find row by doctor_id in Doctors sheet and update all cells.
-    """
+    """Update an existing doctor record by doctor_id."""
     with _conn() as conn:
         conn.execute("""
             UPDATE doctors SET
@@ -589,25 +600,14 @@ def update_doctor(doctor_id: str, doctor_data: dict) -> None:
 
 
 def delete_doctor(doctor_id: str) -> None:
-    """
-    Remove a doctor record by doctor_id.
-
-    Phase 2:
-        Find row by doctor_id in Doctors sheet and delete it.
-    """
+    """Remove a doctor record by doctor_id."""
     with _conn() as conn:
         conn.execute("DELETE FROM doctors WHERE doctor_id = ?", (doctor_id,))
         conn.commit()
 
 
 def search_doctors(query: str) -> list[dict]:
-    """
-    Search doctors by surname, first name, provider number, or practice name.
-
-    Phase 2:
-        records = _get_sheet().worksheet("Doctors").get_all_records()
-        return [r for r in records if query.lower() in ...]
-    """
+    """Search doctors by surname, first name, provider number, or practice name."""
     like = f"%{query.strip()}%"
     with _conn() as conn:
         rows = conn.execute("""

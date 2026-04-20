@@ -378,7 +378,7 @@ def generate_referral_pdf(
     # ── FOOTER ────────────────────────────────────────────────────────────────
     footer_text = (
         f"Valid: {referral['date']} – {referral['valid_until']}  |  "
-        f"Referral ID: {referral['referral_id']}  |  "
+        f"Accession: {referral.get('accession_number') or referral.get('referral_id', '—')}  |  "
         "CONFIDENTIAL – This document contains private health information protected under the "
         "Privacy Act 1988 (Cth) and the Australian Privacy Principles (APPs). "
         "Unauthorised disclosure is prohibited."

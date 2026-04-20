@@ -16,7 +16,7 @@ import os
 
 import streamlit as st
 
-from tabs import new_referral, patient_search, settings, worklist
+from tabs import patient_search, settings, worklist
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -25,6 +25,54 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# ── Authentication gate ───────────────────────────────────────────────────────
+if not st.user.is_logged_in:
+    st.markdown("""
+    <style>
+        .login-card {
+            max-width: 420px;
+            margin: 8vh auto 0 auto;
+            background: #ffffff;
+            border-radius: 14px;
+            padding: 2.5rem 2.5rem 2rem 2.5rem;
+            box-shadow: 0 4px 28px rgba(13,43,78,0.13);
+            text-align: center;
+        }
+        .login-card h1  { color: #0d2b4e; font-size: 1.7rem; margin-bottom: 0.2rem; }
+        .login-card p   { color: #555; font-size: 0.88rem; margin-bottom: 1.6rem; }
+        .login-footer   { margin-top: 1.4rem; font-size: 0.75rem; color: #aaa; }
+    </style>
+    <div class="login-card">
+        <h1>🏥 Radiology2u</h1>
+        <p>Radiology Information System (RIS)<br>
+        Confidential — Privacy Act 1988 (Cth)</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_l, col_c, col_r = st.columns([1, 1.5, 1])
+    with col_c:
+        st.button(
+            "🔐 Sign in",
+            on_click=st.login,
+            args=("auth0",),
+            use_container_width=True,
+            type="primary",
+        )
+        st.markdown(
+            '<p style="text-align:center;font-size:0.75rem;color:#aaa;">'
+            'Authorised personnel only</p>',
+            unsafe_allow_html=True,
+        )
+    st.stop()
+
+# ── Authorisation check ───────────────────────────────────────────────────────
+ALLOWED_EMAILS = st.secrets.get("allowed_emails", [])
+if ALLOWED_EMAILS and st.user.get("email") not in ALLOWED_EMAILS:
+    st.error("⛔ Access denied. Your account is not authorised to use this application.")
+    st.caption(f"Signed in as: {st.user.get('email', 'unknown')}")
+    st.button("Sign out", on_click=st.logout)
+    st.stop()
 
 # ── Global CSS / Radiology2u branding ─────────────────────────────────────────
 st.markdown("""
@@ -80,22 +128,7 @@ def load_settings() -> dict:
     return {}
 
 
-def save_settings(data: dict) -> None:
-    with open(_SETTINGS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
 cfg = load_settings()
-
-# ── Session state defaults ─────────────────────────────────────────────────────
-for _k, _v in [
-    ("pdf_bytes",    None),
-    ("referral_id",  None),
-    ("pt_lastname",  ""),
-    ("pt_firstname", ""),
-]:
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
 
 # ── App header ─────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -109,24 +142,83 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Tab navigation ─────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📋  New Referral Order",
+# ── Navigation (radio triggers a real rerun on switch) ─────────────────────────
+st.markdown("""
+<style>
+/* Style the horizontal radio to look like a tab bar */
+div[data-testid="stRadio"] { margin-bottom: -0.5rem; }
+div[data-testid="stRadio"] > div {
+    display: flex; flex-direction: row; gap: 0;
+    border-bottom: 2px solid #c8d8ea;
+}
+div[data-testid="stRadio"] > div > label {
+    padding: 0.55rem 1.3rem;
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    margin-bottom: -2px;
+    font-weight: 500;
+    color: #555;
+    white-space: nowrap;
+}
+div[data-testid="stRadio"] > div > label:has(input:checked) {
+    background: #ffffff;
+    border-color: #c8d8ea;
+    border-bottom-color: #ffffff;
+    color: #0d2b4e;
+    font-weight: 700;
+}
+div[data-testid="stRadio"] > div > label > div:first-child { display: none; }
+</style>
+""", unsafe_allow_html=True)
+
+_NAV_LABELS = [
+    "🏥  Patients & Referrals",
     "📊  Imaging Worklist",
-    "🔍  Patient Registry",
     "⚙️  Settings",
-])
+]
+_NAV_CLEAR = {
+    "🏥  Patients & Referrals": [
+        "rp_", "nv_", "ps_", "edit_", "act_",
+        "ps_selected_mid", "ps_action",
+    ],
+    "📊  Imaging Worklist": ["wl_"],
+    "⚙️  Settings": [
+        "add_", "dr_search", "_dr_reg_nav", "_prev_dr_reg_nav",
+        "_settings_nav", "_prev_settings_nav",
+    ],
+}
 
-with tab1:
-    new_referral.render(cfg)
+_active = st.radio(
+    "Navigation",
+    _NAV_LABELS,
+    horizontal=True,
+    label_visibility="collapsed",
+    key="_nav",
+)
 
-with tab2:
+# Detect switch — clear the NEWLY-SELECTED tab's stale state so it starts fresh
+_prev_nav = st.session_state.get("_prev_nav", _active)
+if _prev_nav != _active:
+    for _k in list(st.session_state.keys()):
+        for _pfx in _NAV_CLEAR.get(_active, []):
+            if _k == _pfx or _k.startswith(_pfx):
+                try:
+                    del st.session_state[_k]
+                except KeyError:
+                    pass
+                break
+st.session_state["_prev_nav"] = _active
+
+st.markdown("")
+
+# Only the selected tab renders — inactive widgets don't exist, no stale state
+if _active == "🏥  Patients & Referrals":
+    patient_search.render(cfg)
+elif _active == "📊  Imaging Worklist":
     worklist.render()
-
-with tab3:
-    patient_search.render()
-
-with tab4:
+elif _active == "⚙️  Settings":
     settings.render()
 
 
