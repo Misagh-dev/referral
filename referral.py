@@ -26,8 +26,41 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+
+def _is_logged_in() -> bool:
+    """Version-safe check for Streamlit auth login state."""
+    user_obj = getattr(st, "user", None)
+    if user_obj is None:
+        return False
+
+    # Newer Streamlit auth object style
+    login_flag = getattr(user_obj, "is_logged_in", None)
+    if isinstance(login_flag, bool):
+        return login_flag
+    if callable(login_flag):
+        try:
+            return bool(login_flag())
+        except Exception:
+            pass
+
+    # Fallback for dict-like user objects
+    try:
+        return bool(user_obj.get("is_logged_in", False))
+    except Exception:
+        return False
+
+
+def _user_email() -> str:
+    user_obj = getattr(st, "user", None)
+    if user_obj is None:
+        return ""
+    try:
+        return str(user_obj.get("email", ""))
+    except Exception:
+        return ""
+
 # ── Authentication gate ───────────────────────────────────────────────────────
-if not st.user.is_logged_in:
+if not _is_logged_in():
     st.markdown("""
     <style>
         .login-card {
@@ -68,9 +101,9 @@ if not st.user.is_logged_in:
 
 # ── Authorisation check ───────────────────────────────────────────────────────
 ALLOWED_EMAILS = st.secrets.get("allowed_emails", [])
-if ALLOWED_EMAILS and st.user.get("email") not in ALLOWED_EMAILS:
+if ALLOWED_EMAILS and _user_email() not in ALLOWED_EMAILS:
     st.error("⛔ Access denied. Your account is not authorised to use this application.")
-    st.caption(f"Signed in as: {st.user.get('email', 'unknown')}")
+    st.caption(f"Signed in as: {_user_email() or 'unknown'}")
     st.button("Sign out", on_click=st.logout)
     st.stop()
 
