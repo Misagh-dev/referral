@@ -49,4 +49,4 @@ ALL_URGENCIES: list[str] = [
     "Emergency (same day)",
 ]
 
-STATES: list[str] = ["NSW", "VIC", "QLD", "SA", "WA", "TAS", "NT", "ACT"]
+STATES: list[str] = ["", "NSW", "VIC", "QLD", "SA", "WA", "TAS", "NT", "ACT"]
