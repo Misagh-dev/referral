@@ -35,7 +35,15 @@ def _get_service_account_dict() -> dict[str, Any] | None:
     }
     if not cfg or any(not cfg.get(k) for k in required):
         return None
-    return dict(cfg)
+
+    normalized = dict(cfg)
+    raw_key = str(normalized.get("private_key", ""))
+    # Support both TOML styles: literal '\n' sequences or true multiline strings.
+    key_text = raw_key.replace("\\n", "\n").replace("\r\n", "\n").strip()
+    # Remove accidental indentation/spaces introduced by secrets editors.
+    key_lines = [line.strip() for line in key_text.split("\n") if line.strip()]
+    normalized["private_key"] = "\n".join(key_lines) + "\n"
+    return normalized
 
 
 def _get_root_folder_id() -> str | None:

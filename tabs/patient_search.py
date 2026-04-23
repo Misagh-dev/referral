@@ -236,6 +236,12 @@ def _visit_step3(mid: str, pat: dict) -> None:
         "from the information entered in Steps 1 and 2."
     )
 
+    persisted_errors = st.session_state.pop("nv_upload_errors", None)
+    if persisted_errors:
+        st.warning("Visit saved, but some Drive uploads failed:")
+        for err in persisted_errors:
+            st.caption(f"- {err}")
+
     # ── Upload section ────────────────────────────────────────────────────────
     with st.expander("📎 Upload Existing Documents", expanded=False):
         uploaded = st.file_uploader(
@@ -442,9 +448,7 @@ def _visit_step3(mid: str, pat: dict) -> None:
                                 upload_errors.append(f"{uf.name}: {ex}")
 
                     if upload_errors:
-                        st.warning("Visit saved, but some Drive uploads failed:")
-                        for err in upload_errors:
-                            st.caption(f"- {err}")
+                        st.session_state["nv_upload_errors"] = upload_errors
 
                 st.session_state["nv_pdf_bytes"]    = pdf_bytes
                 st.session_state["nv_accession"]    = accession
