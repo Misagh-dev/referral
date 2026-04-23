@@ -7,12 +7,19 @@ import re
 from typing import Any
 
 import streamlit as st
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 _FOLDER_MIME = "application/vnd.google-apps.folder"
 _DRIVE_SCOPE = ["https://www.googleapis.com/auth/drive"]
+
+
+def _has_real_value(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and not text.startswith("REPLACE_")
 
 
 def _safe_name(value: str) -> str:
@@ -33,7 +40,7 @@ def _get_service_account_dict() -> dict[str, Any] | None:
         "auth_provider_x509_cert_url",
         "client_x509_cert_url",
     }
-    if not cfg or any(not cfg.get(k) for k in required):
+    if not cfg or any(not _has_real_value(cfg.get(k)) for k in required):
         return None
 
     normalized = dict(cfg)
@@ -46,25 +53,58 @@ def _get_service_account_dict() -> dict[str, Any] | None:
     return normalized
 
 
+def _get_oauth_dict() -> dict[str, Any] | None:
+    cfg = st.secrets.get("google_oauth", {})
+    required = {"client_id", "client_secret", "refresh_token", "token_uri"}
+    if not cfg or any(not _has_real_value(cfg.get(k)) for k in required):
+        return None
+    return {k: str(v).strip() for k, v in dict(cfg).items()}
+
+
 def _get_root_folder_id() -> str | None:
     gd_cfg = st.secrets.get("google_drive", {})
     folder_id = gd_cfg.get("root_folder_id", "")
-    return str(folder_id).strip() or None
+    folder_id = str(folder_id).strip()
+    return folder_id if _has_real_value(folder_id) else None
 
 
 def is_drive_configured() -> bool:
-    return bool(_get_service_account_dict() and _get_root_folder_id())
+    return bool((_get_oauth_dict() or _get_service_account_dict()) and _get_root_folder_id())
+
+
+def _oauth_credentials() -> Credentials:
+    oauth_cfg = _get_oauth_dict()
+    if not oauth_cfg:
+        raise RuntimeError("Google OAuth secrets are missing.")
+
+    creds = Credentials(
+        token=oauth_cfg.get("access_token") or None,
+        refresh_token=oauth_cfg["refresh_token"],
+        token_uri=oauth_cfg["token_uri"],
+        client_id=oauth_cfg["client_id"],
+        client_secret=oauth_cfg["client_secret"],
+        scopes=_DRIVE_SCOPE,
+    )
+    if not creds.valid:
+        creds.refresh(Request())
+    return creds
 
 
 @st.cache_resource(show_spinner=False)
 def _drive_service():
-    svc_dict = _get_service_account_dict()
-    if not svc_dict:
-        raise RuntimeError("Google Drive service account secrets are missing.")
-    creds = service_account.Credentials.from_service_account_info(
-        svc_dict,
-        scopes=_DRIVE_SCOPE,
-    )
+    oauth_cfg = _get_oauth_dict()
+    if oauth_cfg:
+        creds = _oauth_credentials()
+    else:
+        svc_dict = _get_service_account_dict()
+        if not svc_dict:
+            raise RuntimeError(
+                "Google Drive secrets are missing. Configure either google_oauth or gcp_service_account."
+            )
+        creds = service_account.Credentials.from_service_account_info(
+            svc_dict,
+            scopes=_DRIVE_SCOPE,
+        )
     return build("drive", "v3", credentials=creds)
 
 
