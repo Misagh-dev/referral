@@ -16,6 +16,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from drive_storage import is_drive_configured, upload_document
 from pdf_generator import generate_referral_pdf
 from sheets_db import (
     create_referral,
@@ -23,9 +24,12 @@ from sheets_db import (
     delete_referral,
     get_all_doctors,
     get_all_patients,
+    get_documents_for_referral,
     get_doctor_by_id,
     get_patient_referrals,
+    get_referral_by_id,
     register_patient,
+    save_document_metadata,
     search_patients,
     update_patient,
     update_referral,
@@ -241,12 +245,14 @@ def _visit_step3(mid: str, pat: dict) -> None:
             key="nv_uploads",
         )
         if uploaded:
-            st.success(
-                f"{len(uploaded)} file(s) selected. "
-                "Document storage to Google Drive will be available in a future update."
-            )
+            st.success(f"{len(uploaded)} file(s) selected and ready to upload on save.")
             for uf in uploaded:
                 st.caption(f"📄 {uf.name}  ({round(uf.size / 1024, 1)} KB)")
+        if not is_drive_configured():
+            st.warning(
+                "Google Drive is not configured. Files can be selected, "
+                "but they will not be uploaded until secrets are configured."
+            )
 
     st.markdown("---")
 
@@ -376,6 +382,70 @@ def _visit_step3(mid: str, pat: dict) -> None:
                     referral_data["accession_number"] = accession
                     pdf_bytes = generate_referral_pdf(patient_data, doctor_data, referral_data)
 
+                    upload_errors: list[str] = []
+                    if is_drive_configured():
+                        created_ref = get_referral_by_id(accession) or {}
+                        referral_id = created_ref.get("referral_id", "")
+                        patient_id = pat.get("patient_id", "")
+                        patient_name = (
+                            f"{pat.get('firstname', '')} {pat.get('lastname', '')}"
+                        ).strip()
+
+                        try:
+                            pdf_name = f"R2U_{accession}_{pat.get('lastname', '')}_{pat.get('firstname', '')}.pdf"
+                            pdf_uploaded = upload_document(
+                                file_bytes=pdf_bytes,
+                                filename=pdf_name,
+                                mime_type="application/pdf",
+                                patient_id=patient_id,
+                                patient_name=patient_name,
+                                accession_number=accession,
+                                category="referral_pdf",
+                            )
+                            save_document_metadata({
+                                "referral_id": referral_id,
+                                "medicare": mid,
+                                "accession_number": accession,
+                                "file_name": pdf_uploaded.get("name", pdf_name),
+                                "mime_type": pdf_uploaded.get("mimeType", "application/pdf"),
+                                "file_size_bytes": int(pdf_uploaded.get("size", len(pdf_bytes))),
+                                "category": "referral_pdf",
+                                "drive_file_id": pdf_uploaded.get("id", ""),
+                                "drive_web_link": pdf_uploaded.get("webViewLink", ""),
+                            })
+                        except Exception as ex:
+                            upload_errors.append(f"Referral PDF upload failed: {ex}")
+
+                        for uf in (uploaded or []):
+                            try:
+                                up = upload_document(
+                                    file_bytes=uf.getvalue(),
+                                    filename=uf.name,
+                                    mime_type=getattr(uf, "type", "application/octet-stream"),
+                                    patient_id=patient_id,
+                                    patient_name=patient_name,
+                                    accession_number=accession,
+                                    category="supporting_document",
+                                )
+                                save_document_metadata({
+                                    "referral_id": referral_id,
+                                    "medicare": mid,
+                                    "accession_number": accession,
+                                    "file_name": up.get("name", uf.name),
+                                    "mime_type": up.get("mimeType", getattr(uf, "type", "application/octet-stream")),
+                                    "file_size_bytes": int(up.get("size", uf.size)),
+                                    "category": "supporting_document",
+                                    "drive_file_id": up.get("id", ""),
+                                    "drive_web_link": up.get("webViewLink", ""),
+                                })
+                            except Exception as ex:
+                                upload_errors.append(f"{uf.name}: {ex}")
+
+                    if upload_errors:
+                        st.warning("Visit saved, but some Drive uploads failed:")
+                        for err in upload_errors:
+                            st.caption(f"- {err}")
+
                 st.session_state["nv_pdf_bytes"]    = pdf_bytes
                 st.session_state["nv_accession"]    = accession
                 st.session_state["nv_pt_lastname"]  = pat.get("lastname", "")
@@ -414,7 +484,43 @@ def _visit_step3(mid: str, pat: dict) -> None:
                     "doctor_email":         dr_email,
                 }
                 accession = create_referral(referral_data)
+                upload_errors: list[str] = []
+                if is_drive_configured() and uploaded:
+                    created_ref = get_referral_by_id(accession) or {}
+                    referral_id = created_ref.get("referral_id", "")
+                    patient_id = pat.get("patient_id", "")
+                    patient_name = (
+                        f"{pat.get('firstname', '')} {pat.get('lastname', '')}"
+                    ).strip()
+                    for uf in uploaded:
+                        try:
+                            up = upload_document(
+                                file_bytes=uf.getvalue(),
+                                filename=uf.name,
+                                mime_type=getattr(uf, "type", "application/octet-stream"),
+                                patient_id=patient_id,
+                                patient_name=patient_name,
+                                accession_number=accession,
+                                category="supporting_document",
+                            )
+                            save_document_metadata({
+                                "referral_id": referral_id,
+                                "medicare": mid,
+                                "accession_number": accession,
+                                "file_name": up.get("name", uf.name),
+                                "mime_type": up.get("mimeType", getattr(uf, "type", "application/octet-stream")),
+                                "file_size_bytes": int(up.get("size", uf.size)),
+                                "category": "supporting_document",
+                                "drive_file_id": up.get("id", ""),
+                                "drive_web_link": up.get("webViewLink", ""),
+                            })
+                        except Exception as ex:
+                            upload_errors.append(f"{uf.name}: {ex}")
                 st.success(f"✅ Visit saved — Accession: **{accession}**")
+                if upload_errors:
+                    st.warning("Visit saved, but some Drive uploads failed:")
+                    for err in upload_errors:
+                        st.caption(f"- {err}")
                 st.session_state.pop("ps_action", None)
                 st.rerun()
 
@@ -815,6 +921,18 @@ def render(cfg: dict | None = None) -> None:
                                 f"</span>",
                                 unsafe_allow_html=True,
                             )
+                            docs = get_documents_for_referral(rid)
+                            if docs:
+                                for doc in docs:
+                                    doc_name = doc.get("file_name", "Document")
+                                    doc_link = doc.get("drive_web_link", "")
+                                    if doc_link:
+                                        st.markdown(
+                                            f"- 📎 [{doc_name}]({doc_link})",
+                                            unsafe_allow_html=False,
+                                        )
+                                    else:
+                                        st.caption(f"📎 {doc_name}")
                         with hc2:
                             if st.button("✏️ Edit", key=f"edit_visit_{rid}",
                                          use_container_width=True):

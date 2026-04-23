@@ -209,6 +209,23 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS documents (
+                document_id      TEXT PRIMARY KEY,
+                referral_id      TEXT,
+                medicare         TEXT,
+                accession_number TEXT,
+                file_name        TEXT,
+                mime_type        TEXT,
+                file_size_bytes  INTEGER,
+                category         TEXT,
+                drive_file_id    TEXT,
+                drive_web_link   TEXT,
+                uploaded_at      TEXT
+            )
+            """
+        )
 
     patient_id_added = _ensure_column("patients", "patient_id", "TEXT")
     if patient_id_added:
@@ -687,3 +704,45 @@ def get_doctor_by_id(doctor_id: str) -> dict | None:
             "SELECT * FROM doctors WHERE doctor_id = ?", (doctor_id,)
         ).fetchone()
         return dict(row) if row else None
+
+
+def save_document_metadata(document_data: dict) -> str:
+    document_id = str(uuid.uuid4())
+    uploaded_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO documents (
+                document_id, referral_id, medicare, accession_number,
+                file_name, mime_type, file_size_bytes, category,
+                drive_file_id, drive_web_link, uploaded_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                document_id,
+                document_data.get("referral_id") or "",
+                document_data.get("medicare") or "",
+                document_data.get("accession_number") or "",
+                document_data.get("file_name") or "",
+                document_data.get("mime_type") or "",
+                int(document_data.get("file_size_bytes") or 0),
+                document_data.get("category") or "supporting_document",
+                document_data.get("drive_file_id") or "",
+                document_data.get("drive_web_link") or "",
+                uploaded_at,
+            ),
+        )
+    return document_id
+
+
+def get_documents_for_referral(referral_id: str) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM documents
+            WHERE referral_id = ?
+            ORDER BY uploaded_at DESC
+            """,
+            (referral_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
