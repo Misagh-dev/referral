@@ -1,0 +1,26 @@
+services:
+  ris-app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    # When pulling a pre-built image from Docker Hub instead, replace the above with:
+    # image: yourdockerhubuser/ris-app:latest
+    restart: unless-stopped
+    environment:
+      # Directory inside the container where uploaded documents are stored.
+      # Mapped to the named volume below — data persists across restarts and upgrades.
+      STORAGE_ROOT: /app/ris_storage
+      # Optional: PostgreSQL connection string for persistent metadata.
+      # Leave empty to fall back to SQLite (data is lost when container is recreated).
+      DATABASE_URL: ${DATABASE_URL:-}
+    volumes:
+      # Document storage — persists across container restarts
+      - ris_storage:/app/ris_storage
+      # Streamlit secrets (Auth0, allowed_emails, etc.)
+      # Copy secrets.toml.example → ../.streamlit/secrets.toml and fill in your values.
+      - ../.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+    ports:
+      - "8501:8501"
+
+volumes:
+  ris_storage:

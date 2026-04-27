@@ -16,7 +16,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from drive_storage import is_drive_configured, upload_document
+from local_storage import is_local_storage_configured, upload_document
 from pdf_generator import generate_referral_pdf
 from sheets_db import (
     create_referral,
@@ -238,7 +238,7 @@ def _visit_step3(mid: str, pat: dict) -> None:
 
     persisted_errors = st.session_state.pop("nv_upload_errors", None)
     if persisted_errors:
-        st.warning("Visit saved, but some Drive uploads failed:")
+        st.warning("Visit saved, but some storage uploads failed:")
         for err in persisted_errors:
             st.caption(f"- {err}")
 
@@ -254,10 +254,11 @@ def _visit_step3(mid: str, pat: dict) -> None:
             st.success(f"{len(uploaded)} file(s) selected and ready to upload on save.")
             for uf in uploaded:
                 st.caption(f"📄 {uf.name}  ({round(uf.size / 1024, 1)} KB)")
-        if not is_drive_configured():
+        if not is_local_storage_configured():
             st.warning(
-                "Google Drive is not configured. Files can be selected, "
-                "but they will not be uploaded until secrets are configured."
+                "⚠️ Local document storage is not configured. "
+                "Files can be selected, but uploads will fail until storage_base_url "
+                "is set in Streamlit secrets."
             )
 
     st.markdown("---")
@@ -389,16 +390,16 @@ def _visit_step3(mid: str, pat: dict) -> None:
                     pdf_bytes = generate_referral_pdf(patient_data, doctor_data, referral_data)
 
                     upload_errors: list[str] = []
-                    if is_drive_configured():
-                        created_ref = get_referral_by_id(accession) or {}
-                        referral_id = created_ref.get("referral_id", "")
-                        patient_id = pat.get("patient_id", "")
-                        patient_name = (
-                            f"{pat.get('firstname', '')} {pat.get('lastname', '')}"
-                        ).strip()
+                    created_ref = get_referral_by_id(accession) or {}
+                    referral_id = created_ref.get("referral_id", "")
+                    patient_id = pat.get("patient_id", "")
+                    patient_name = (
+                        f"{pat.get('firstname', '')} {pat.get('lastname', '')}"
+                    ).strip()
 
+                    pdf_name = f"R2U_{accession}_{pat.get('lastname', '')}_{pat.get('firstname', '')}.pdf"
+                    if is_local_storage_configured():
                         try:
-                            pdf_name = f"R2U_{accession}_{pat.get('lastname', '')}_{pat.get('firstname', '')}.pdf"
                             pdf_uploaded = upload_document(
                                 file_bytes=pdf_bytes,
                                 filename=pdf_name,
@@ -416,14 +417,27 @@ def _visit_step3(mid: str, pat: dict) -> None:
                                 "mime_type": pdf_uploaded.get("mimeType", "application/pdf"),
                                 "file_size_bytes": int(pdf_uploaded.get("size", len(pdf_bytes))),
                                 "category": "referral_pdf",
-                                "drive_file_id": pdf_uploaded.get("id", ""),
-                                "drive_web_link": pdf_uploaded.get("webViewLink", ""),
+                                "storage_file_id": pdf_uploaded.get("id", ""),
+                                "storage_url": pdf_uploaded.get("webViewLink", ""),
                             })
                         except Exception as ex:
                             upload_errors.append(f"Referral PDF upload failed: {ex}")
+                    else:
+                        save_document_metadata({
+                            "referral_id": referral_id,
+                            "medicare": mid,
+                            "accession_number": accession,
+                            "file_name": pdf_name,
+                            "mime_type": "application/pdf",
+                            "file_size_bytes": len(pdf_bytes),
+                            "category": "referral_pdf",
+                            "storage_file_id": "",
+                            "storage_url": "",
+                        })
 
-                        for uf in (uploaded or []):
-                            try:
+                    for uf in (uploaded or []):
+                        try:
+                            if is_local_storage_configured():
                                 up = upload_document(
                                     file_bytes=uf.getvalue(),
                                     filename=uf.name,
@@ -441,11 +455,23 @@ def _visit_step3(mid: str, pat: dict) -> None:
                                     "mime_type": up.get("mimeType", getattr(uf, "type", "application/octet-stream")),
                                     "file_size_bytes": int(up.get("size", uf.size)),
                                     "category": "supporting_document",
-                                    "drive_file_id": up.get("id", ""),
-                                    "drive_web_link": up.get("webViewLink", ""),
+                                    "storage_file_id": up.get("id", ""),
+                                    "storage_url": up.get("webViewLink", ""),
                                 })
-                            except Exception as ex:
-                                upload_errors.append(f"{uf.name}: {ex}")
+                            else:
+                                save_document_metadata({
+                                    "referral_id": referral_id,
+                                    "medicare": mid,
+                                    "accession_number": accession,
+                                    "file_name": uf.name,
+                                    "mime_type": getattr(uf, "type", "application/octet-stream"),
+                                    "file_size_bytes": uf.size,
+                                    "category": "supporting_document",
+                                    "storage_file_id": "",
+                                    "storage_url": "",
+                                })
+                        except Exception as ex:
+                            upload_errors.append(f"{uf.name}: {ex}")
 
                     if upload_errors:
                         st.session_state["nv_upload_errors"] = upload_errors
@@ -489,15 +515,15 @@ def _visit_step3(mid: str, pat: dict) -> None:
                 }
                 accession = create_referral(referral_data)
                 upload_errors: list[str] = []
-                if is_drive_configured() and uploaded:
-                    created_ref = get_referral_by_id(accession) or {}
-                    referral_id = created_ref.get("referral_id", "")
-                    patient_id = pat.get("patient_id", "")
-                    patient_name = (
-                        f"{pat.get('firstname', '')} {pat.get('lastname', '')}"
-                    ).strip()
-                    for uf in uploaded:
-                        try:
+                created_ref = get_referral_by_id(accession) or {}
+                referral_id = created_ref.get("referral_id", "")
+                patient_id = pat.get("patient_id", "")
+                patient_name = (
+                    f"{pat.get('firstname', '')} {pat.get('lastname', '')}"
+                ).strip()
+                for uf in (uploaded or []):
+                    try:
+                        if is_local_storage_configured():
                             up = upload_document(
                                 file_bytes=uf.getvalue(),
                                 filename=uf.name,
@@ -515,14 +541,26 @@ def _visit_step3(mid: str, pat: dict) -> None:
                                 "mime_type": up.get("mimeType", getattr(uf, "type", "application/octet-stream")),
                                 "file_size_bytes": int(up.get("size", uf.size)),
                                 "category": "supporting_document",
-                                "drive_file_id": up.get("id", ""),
-                                "drive_web_link": up.get("webViewLink", ""),
+                                "storage_file_id": up.get("id", ""),
+                                "storage_url": up.get("webViewLink", ""),
                             })
-                        except Exception as ex:
-                            upload_errors.append(f"{uf.name}: {ex}")
+                        else:
+                            save_document_metadata({
+                                "referral_id": referral_id,
+                                "medicare": mid,
+                                "accession_number": accession,
+                                "file_name": uf.name,
+                                "mime_type": getattr(uf, "type", "application/octet-stream"),
+                                "file_size_bytes": uf.size,
+                                "category": "supporting_document",
+                                "storage_file_id": "",
+                                "storage_url": "",
+                            })
+                    except Exception as ex:
+                        upload_errors.append(f"{uf.name}: {ex}")
                 st.success(f"✅ Visit saved — Accession: **{accession}**")
                 if upload_errors:
-                    st.warning("Visit saved, but some Drive uploads failed:")
+                    st.warning("Visit saved, but some storage uploads failed:")
                     for err in upload_errors:
                         st.caption(f"- {err}")
                 st.session_state.pop("ps_action", None)
@@ -929,7 +967,7 @@ def render(cfg: dict | None = None) -> None:
                             if docs:
                                 for doc in docs:
                                     doc_name = doc.get("file_name", "Document")
-                                    doc_link = doc.get("drive_web_link", "")
+                                    doc_link = doc.get("storage_url", "")
                                     if doc_link:
                                         st.markdown(
                                             f"- 📎 [{doc_name}]({doc_link})",

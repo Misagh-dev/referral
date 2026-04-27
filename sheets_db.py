@@ -220,8 +220,8 @@ def init_db() -> None:
                 mime_type        TEXT,
                 file_size_bytes  INTEGER,
                 category         TEXT,
-                drive_file_id    TEXT,
-                drive_web_link   TEXT,
+                storage_file_id  TEXT,
+                storage_url      TEXT,
                 uploaded_at      TEXT
             )
             """
@@ -715,7 +715,7 @@ def save_document_metadata(document_data: dict) -> str:
             INSERT INTO documents (
                 document_id, referral_id, medicare, accession_number,
                 file_name, mime_type, file_size_bytes, category,
-                drive_file_id, drive_web_link, uploaded_at
+                storage_file_id, storage_url, uploaded_at
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
@@ -727,8 +727,8 @@ def save_document_metadata(document_data: dict) -> str:
                 document_data.get("mime_type") or "",
                 int(document_data.get("file_size_bytes") or 0),
                 document_data.get("category") or "supporting_document",
-                document_data.get("drive_file_id") or "",
-                document_data.get("drive_web_link") or "",
+                document_data.get("storage_file_id") or document_data.get("drive_file_id") or "",
+                document_data.get("storage_url") or document_data.get("drive_web_link") or "",
                 uploaded_at,
             ),
         )
