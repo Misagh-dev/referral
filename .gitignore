@@ -21,6 +21,10 @@ __pycache__/
 # Streamlit secrets (if added later)
 .streamlit/secrets.toml
 
+# Docker environment variables (contains database credentials)
+docker/.env
+.env
+
 # OS files
 .DS_Store
 Thumbs.db

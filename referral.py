@@ -54,10 +54,24 @@ def _user_email() -> str:
     user_obj = getattr(st, "user", None)
     if user_obj is None:
         return ""
+    
+    # Try attribute access first (newer Streamlit)
     try:
-        return str(user_obj.get("email", ""))
+        email = getattr(user_obj, "email", None)
+        if email:
+            return str(email)
     except Exception:
-        return ""
+        pass
+    
+    # Fallback to dict-like access
+    try:
+        email = user_obj.get("email", "")
+        if email:
+            return str(email)
+    except Exception:
+        pass
+    
+    return ""
 
 # ── Authentication gate ───────────────────────────────────────────────────────
 if not _is_logged_in():
