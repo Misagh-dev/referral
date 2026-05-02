@@ -86,3 +86,19 @@ def download_document(storage_file_id: str, api_token: str = "") -> bytes | None
         return None
 
     return target.read_bytes()
+
+
+def delete_document(storage_file_id: str) -> bool:
+    """Delete a file from local storage. Returns True if deleted, False if not found."""
+    root = _get_storage_root()
+    target = (root / storage_file_id).resolve()
+
+    # Prevent path traversal
+    if not target.is_relative_to(root.resolve()):
+        return False
+
+    if not target.exists():
+        return False
+
+    target.unlink()
+    return True

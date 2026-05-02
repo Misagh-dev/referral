@@ -5,15 +5,18 @@ Compliant with Australian health documentation standards.
 """
 
 import io
+import json
 from datetime import datetime
+from pathlib import Path
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     HRFlowable,
+    Image,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -32,6 +35,25 @@ RED         = colors.HexColor("#b71c1c")
 ORANGE      = colors.HexColor("#e65c00")
 AMBER       = colors.HexColor("#e68a00")
 GREEN       = colors.HexColor("#1b5e20")
+
+# ── Report PDF colour palette (purple, from gen/info/report_template.json) ─────
+RPT_DEEP    = colors.HexColor("#3a1c71")   # primary
+RPT_MID     = colors.HexColor("#4e2c8e")   # secondary
+RPT_ACCENT  = colors.HexColor("#633aa8")   # accent
+RPT_LIGHT   = colors.HexColor("#ede8f7")   # light tint
+
+# ── Branding template (assets bundled with the app) ──────────────────────────
+_ASSETS        = Path(__file__).resolve().parent / "assets"
+_TEMPLATE_FILE = _ASSETS / "report_template.json"
+
+
+def _load_gen_template() -> dict:
+    try:
+        if _TEMPLATE_FILE.exists():
+            return json.loads(_TEMPLATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
 
 
 def _urgency_color(urgency: str) -> colors.Color:
@@ -384,6 +406,259 @@ def generate_referral_pdf(
         "Unauthorised disclosure is prohibited."
     )
     story.append(Paragraph(footer_text, s["footer"]))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def generate_report_pdf(
+    patient: dict,
+    referral: dict,
+    report: dict,
+) -> bytes:
+    """
+    Build and return a formal A4 radiology report PDF with full clinic branding
+    loaded from gen/info/report_template.json (logo, purple palette, clinician
+    details, disclaimer).
+
+    Parameters
+    ----------
+    patient  : Patient demographics dict
+    referral : Referral / study dict
+    report   : Report dict (findings, impression, conclusion, radiologist, status)
+    """
+    # ── Load branding ────────────────────────────────────────────────────────
+    tmpl           = _load_gen_template()
+    clinic_name    = tmpl.get("clinic_name",        "Radiology2U")
+    clinic_role    = tmpl.get("clinic_role",        "Mobile Ultrasound Services")
+    clinic_addr    = tmpl.get("clinic_address",     "")
+    clinic_phone   = tmpl.get("clinic_phone",       "")
+    clinic_email   = tmpl.get("clinic_email",       "")
+    clinician_name = tmpl.get("clinician_name",     "")
+    clinician_cred = tmpl.get("clinician_credentials", "")
+    clinician_spec = tmpl.get("Clinician_specialty","")
+    accreditation  = tmpl.get("accreditation",      "")
+    disclaimer_txt = tmpl.get("disclaimer",         "")
+
+    buffer = io.BytesIO()
+    W      = 170 * mm
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=20 * mm, rightMargin=20 * mm,
+        topMargin=12 * mm,  bottomMargin=16 * mm,
+    )
+
+    s     = _styles()
+    story = []
+
+    # ── Inline styles for the report layout ──────────────────────────────────
+    st_center_hdr  = ParagraphStyle("rch",  fontName="Helvetica",      fontSize=8.5,
+                                    textColor=colors.white, leading=15)
+    st_right_hdr   = ParagraphStyle("rrh",  fontName="Helvetica",      fontSize=8,
+                                    textColor=colors.HexColor("#d4c8f0"),
+                                    alignment=TA_RIGHT, leading=12)
+    st_rpt_section = ParagraphStyle("rrs",  fontName="Helvetica-Bold", fontSize=8.5,
+                                    textColor=RPT_DEEP)
+    st_provider    = ParagraphStyle("rpv",  fontName="Helvetica",      fontSize=8,
+                                    textColor=DARK_GREY, leading=12)
+    st_disclaimer  = ParagraphStyle("rdis", fontName="Helvetica",      fontSize=7.5,
+                                    textColor=DARK_GREY, leading=11)
+
+    # ── HEADER: logo | clinic + title | contact ───────────────────────────────
+    logo_path = _ASSETS / "logo.png"
+    if logo_path.exists():
+        logo_cell = Image(str(logo_path), width=28 * mm, height=28 * mm)
+    else:
+        logo_cell = Paragraph(
+            f'<font name="Helvetica-Bold" size="16" color="white">{clinic_name[:4]}</font>',
+            ParagraphStyle("lf", textColor=colors.white),
+        )
+
+    center_markup = (
+        f'<font name="Helvetica-Bold" size="14" color="white">{clinic_name}</font><br/>'
+        f'<font name="Helvetica" size="8" color="#d4c8f0">{clinic_role}</font><br/><br/>'
+        f'<font name="Helvetica-Bold" size="10" color="#c5b8e8">RADIOLOGY REPORT</font>'
+    )
+    center_cell = Paragraph(center_markup, st_center_hdr)
+
+    right_lines = []
+    if clinic_phone:
+        right_lines.append(clinic_phone)
+    if clinic_email:
+        right_lines.append(clinic_email)
+    right_cell = Paragraph("<br/>".join(right_lines), st_right_hdr)
+
+    hdr_tbl = Table(
+        [[logo_cell, center_cell, right_cell]],
+        colWidths=[33 * mm, 95 * mm, 42 * mm],
+    )
+    hdr_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), RPT_DEEP),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING",    (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
+    ]))
+
+    # Sub-bar: generated timestamp only
+    sub_text = f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+    sub_tbl = Table([[Paragraph(sub_text, s["header_sub"])]], colWidths=[W])
+    sub_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), RPT_MID),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story += [hdr_tbl, sub_tbl, Spacer(1, 4 * mm)]
+
+    # ── Section helpers (purple) ──────────────────────────────────────────────
+    def _rpt_hdr(title: str) -> Table:
+        t = Table([[Paragraph(title, st_rpt_section)]], colWidths=[W])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), RPT_LIGHT),
+            ("TOPPADDING",    (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 7),
+            ("BOX",           (0, 0), (-1, -1), 0.5, MID_GREY),
+        ]))
+        return t
+
+    def _rpt_body(content: str) -> Table:
+        t = Table([[Paragraph(content or "—", s["body"])]], colWidths=[W])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), colors.white),
+            ("TOPPADDING",    (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
+            ("BOX",           (0, 0), (-1, -1), 0.5, MID_GREY),
+        ]))
+        return t
+
+    def _rpt_section(title: str, content: str) -> list:
+        if not content:
+            return []
+        return [_rpt_hdr(title), _rpt_body(content), Spacer(1, 4 * mm)]
+
+    # ── STUDY INFORMATION ─────────────────────────────────────────────────────
+    story.append(_rpt_hdr("STUDY INFORMATION"))
+    age  = _calculate_age(patient.get("dob", ""))
+    L, R = 28 * mm, 57 * mm
+
+    study_rows = [
+        _lv("Patient Name:",  f"{patient.get('lastname','').upper()}, {patient.get('firstname','')}", s),
+        _lv("Date of Birth:", f"{patient.get('dob', '—')}  (Age: {age})", s),
+        _lv("Patient ID:",    patient.get("patient_id", "—"), s),
+        _lv("Modality:",      referral.get("modality", "—"), s),
+        _lv("Examination:",   referral.get("body_region", "—"), s),
+        _lv("Study Date:",    referral.get("referral_date") or referral.get("date_created", "—"), s),
+        _lv("Referring Dr:",  referral.get("referring_doctor", "—"), s),
+        _lv("Provider No:",   referral.get("provider_number", "—"), s),
+    ]
+    study_tbl_data = []
+    for i in range(0, len(study_rows), 2):
+        row = study_rows[i] + (study_rows[i + 1] if i + 1 < len(study_rows) else ["", ""])
+        study_tbl_data.append(row)
+
+    study_tbl = Table(study_tbl_data, colWidths=[L, R, L, R])
+    study_tbl.setStyle(TableStyle([
+        ("TOPPADDING",    (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 5),
+        ("ROWBACKGROUNDS",(0, 0), (-1, -1), [colors.white, RPT_LIGHT]),
+        ("BOX",           (0, 0), (-1, -1), 0.5, MID_GREY),
+        ("LINEBELOW",     (0, 0), (-1, -1), 0.3, MID_GREY),
+    ]))
+    story += [study_tbl, Spacer(1, 4 * mm)]
+
+    # ── CLINICAL INDICATION ───────────────────────────────────────────────────
+    story += _rpt_section("CLINICAL INDICATION", referral.get("clinical_indication", ""))
+
+    # ── REPORT BODY ───────────────────────────────────────────────────────────
+    story += _rpt_section("FINDINGS",                    report.get("findings",   ""))
+    story += _rpt_section("IMPRESSION",                  report.get("impression", ""))
+    story += _rpt_section("CONCLUSION / RECOMMENDATION", report.get("conclusion", ""))
+
+    # ── RADIOLOGIST SIGNATURE ─────────────────────────────────────────────────
+    story += [
+        Spacer(1, 6 * mm),
+        HRFlowable(width=W, thickness=0.5, color=RPT_MID),
+        Spacer(1, 4 * mm),
+    ]
+
+    sig_bold = ParagraphStyle("sb", fontSize=9, fontName="Helvetica-Bold",
+                               textColor=RPT_DEEP)
+    sig_norm = ParagraphStyle("sn", fontSize=9, fontName="Helvetica",
+                               textColor=colors.black)
+
+    radiologist       = report.get("radiologist", "").strip() or "___________________________"
+    # Append RANZCR credential if not already present
+    if "RANZCR" not in radiologist:
+        radiologist_display = f"{radiologist}, RANZCR"
+    else:
+        radiologist_display = radiologist
+    perf_clinician = report.get("performing_clinician", "").strip() or "—"
+    report_date    = datetime.now().strftime("%d/%m/%Y %H:%M")
+    status_label   = report.get("status", "Draft").upper()
+    status_color   = "#1b5e20" if status_label == "FINAL" else "#e65c00"
+
+    sig_data = [
+        [
+            Paragraph(f"Reporting Radiologist: {radiologist_display}", sig_bold),
+            Paragraph(f"Report Date: {report_date}", sig_norm),
+            Paragraph(
+                f'<font color="{status_color}"><b>Status: {status_label}</b></font>',
+                ParagraphStyle("stc", fontSize=9, fontName="Helvetica"),
+            ),
+        ],
+        [
+            Paragraph(f"Performing Clinician: {perf_clinician}", sig_bold),
+            Paragraph("", sig_norm),
+            Paragraph("", sig_norm),
+        ],
+    ]
+    sig_tbl = Table(sig_data, colWidths=[85 * mm, 45 * mm, 40 * mm])
+    sig_tbl.setStyle(TableStyle([
+        ("VALIGN",      (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING",  (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story += [
+        sig_tbl,
+        Spacer(1, 6 * mm),
+        Table(
+            [[Paragraph(
+                f'Digitally signed  {report_date}',
+                sig_norm,
+            ),
+              Paragraph("", sig_norm)]],
+            colWidths=[120 * mm, 50 * mm],
+        ),
+        Spacer(1, 4 * mm),
+        HRFlowable(width=W, thickness=0.5, color=RPT_MID),
+        Spacer(1, 4 * mm),
+    ]
+
+    # ── DISCLAIMER ────────────────────────────────────────────────────────────
+    if disclaimer_txt:
+        disc_tbl = Table(
+            [[Paragraph(f"<i>{disclaimer_txt}</i>", st_disclaimer)]],
+            colWidths=[W],
+        )
+        disc_tbl.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, -1), LIGHT_GREY),
+            ("TOPPADDING",    (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
+            ("BOX",           (0, 0), (-1, -1), 0.5, MID_GREY),
+        ]))
+        story += [disc_tbl, Spacer(1, 3 * mm)]
 
     doc.build(story)
     buffer.seek(0)

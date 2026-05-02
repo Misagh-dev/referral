@@ -6,6 +6,9 @@ ris_database.db
 *.db
 *.sqlite
 
+# Patient data / local storage (stays on server only)
+ris_storage/
+
 # Python virtual environment
 .venv/
 venv/

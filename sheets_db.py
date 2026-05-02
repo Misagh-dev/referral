@@ -226,6 +226,32 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reports (
+                report_id             TEXT PRIMARY KEY,
+                referral_id           TEXT NOT NULL,
+                accession_number      TEXT,
+                medicare              TEXT,
+                findings              TEXT,
+                impression            TEXT,
+                conclusion            TEXT,
+                radiologist           TEXT,
+                performing_clinician  TEXT,
+                status                TEXT DEFAULT 'Draft',
+                created_at            TEXT,
+                updated_at            TEXT,
+                FOREIGN KEY (referral_id) REFERENCES referrals(referral_id)
+            )
+            """
+        )
+        # Migration: add performing_clinician to existing DBs that predate this column
+        try:
+            conn.execute(
+                "ALTER TABLE reports ADD COLUMN performing_clinician TEXT DEFAULT ''"
+            )
+        except Exception:
+            pass  # column already exists
 
     patient_id_added = _ensure_column("patients", "patient_id", "TEXT")
     if patient_id_added:
@@ -256,8 +282,9 @@ def init_db() -> None:
                 mod_code = _MODALITY_CODE.get(row["modality"], "OTH")
                 study_counters[medicare] = study_counters.get(medicare, 0) + 1
                 parts = pid.split("-")
-                yr_seq = f"{parts[1]}-{parts[2]}" if len(parts) >= 3 else "LEGACY-0000"
-                acc = f"R2U-{yr_seq}-{study_counters[medicare]:03d}-{mod_code}"
+                yr2d = parts[1][-2:] if len(parts) >= 3 else datetime.now().strftime("%y")
+                pat_seq = parts[2] if len(parts) >= 3 else "0000"
+                acc = f"{yr2d}-{pat_seq}-{study_counters[medicare]}-{mod_code}"
                 conn.execute(
                     "UPDATE referrals SET accession_number=? WHERE referral_id=?",
                     (acc, row["referral_id"]),
@@ -341,13 +368,14 @@ def create_referral(referral_data: dict) -> str:
             "SELECT patient_id FROM patients WHERE medicare=?", (medicare_key,)
         ).fetchone()
     pid_str = pid_row["patient_id"] if (pid_row and pid_row["patient_id"]) else None
+    yr2d = datetime.now().strftime("%y")
     if pid_str:
         parts = pid_str.split("-")
-        yr_seq = f"{parts[1]}-{parts[2]}" if len(parts) >= 3 else "0000-0000"
+        pat_seq = parts[2] if len(parts) >= 3 else "0000"
     else:
-        yr_seq = datetime.now().strftime("%Y") + "-0000"
+        pat_seq = "0000"
     accession_number = referral_data.get("accession_number") or (
-        f"R2U-{yr_seq}-{study_seq:03d}-{mod_code}"
+        f"{yr2d}-{pat_seq}-{study_seq}-{mod_code}"
     )
     internal_id = str(uuid.uuid4())
     with _conn() as conn:
@@ -746,3 +774,88 @@ def get_documents_for_referral(referral_id: str) -> list[dict]:
             (referral_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def delete_document_metadata(document_id: str) -> None:
+    """Remove a document record from the documents table."""
+    with _conn() as conn:
+        conn.execute(
+            "DELETE FROM documents WHERE document_id = ?",
+            (document_id,),
+        )
+
+
+# ── Report functions ───────────────────────────────────────────────────────────
+
+def save_report(report_data: dict) -> str:
+    """Insert or update a report for a referral. Returns report_id."""
+    now = datetime.now().strftime("%d/%m/%Y %H:%M")
+    referral_id = report_data.get("referral_id", "")
+
+    with _conn() as conn:
+        existing = conn.execute(
+            "SELECT report_id FROM reports WHERE referral_id = ?",
+            (referral_id,),
+        ).fetchone()
+
+        if existing:
+            report_id = existing["report_id"]
+            conn.execute(
+                """
+                UPDATE reports SET
+                    findings              = ?,
+                    impression            = ?,
+                    conclusion            = ?,
+                    radiologist           = ?,
+                    performing_clinician  = ?,
+                    status                = ?,
+                    updated_at            = ?
+                WHERE report_id = ?
+                """,
+                (
+                    report_data.get("findings", ""),
+                    report_data.get("impression", ""),
+                    report_data.get("conclusion", ""),
+                    report_data.get("radiologist", ""),
+                    report_data.get("performing_clinician", ""),
+                    report_data.get("status", "Draft"),
+                    now,
+                    report_id,
+                ),
+            )
+        else:
+            report_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO reports (
+                    report_id, referral_id, accession_number, medicare,
+                    findings, impression, conclusion, radiologist,
+                    performing_clinician, status, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    report_id,
+                    referral_id,
+                    report_data.get("accession_number", ""),
+                    report_data.get("medicare", ""),
+                    report_data.get("findings", ""),
+                    report_data.get("impression", ""),
+                    report_data.get("conclusion", ""),
+                    report_data.get("radiologist", ""),
+                    report_data.get("performing_clinician", ""),
+                    report_data.get("status", "Draft"),
+                    now,
+                    now,
+                ),
+            )
+    return report_id
+
+
+def get_report_by_referral(referral_id: str) -> dict | None:
+    """Return the report for a referral, or None if not started."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM reports WHERE referral_id = ?",
+            (referral_id,),
+        ).fetchone()
+        return dict(row) if row else None

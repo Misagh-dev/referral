@@ -1,0 +1,205 @@
+================================================================================
+  RADIOLOGY2U RIS — FILE TRANSFER & DEPLOYMENT GUIDE
+  This file is also an agent prompt. If you are a Copilot AI agent reading this,
+  follow SECTION A (Agent Instructions) to perform the deployment automatically.
+================================================================================
+
+================================================================================
+SECTION A — AGENT INSTRUCTIONS (read this if you are a Copilot AI agent)
+================================================================================
+
+You are being asked to deploy updated RIS application files onto the server PC.
+The transferred files are already sitting in the server's app directory.
+Your job is to complete the deployment safely. Follow every step in order.
+
+--- CONTEXT -------------------------------------------------------------------
+
+  App directory on server:  C:\Users\User\Desktop\ris\referral\
+  Docker config directory:  C:\Users\User\Desktop\ris\referral\docker\
+  Sensitive files (DO NOT modify these):
+    - C:\Users\User\Desktop\ris\referral\.streamlit\secrets.toml
+    - C:\Users\User\Desktop\ris\referral\docker\.env
+
+--- STEP 1: Verify the transferred files are present ---------------------------
+
+  Check that ALL of these files exist in the app directory.
+  If any are missing, stop and tell the user which files are absent.
+
+    referral\referral.py
+    referral\pdf_generator.py
+    referral\local_storage.py
+    referral\sheets_db.py
+    referral\requirements.txt
+    referral\tabs\patient_search.py
+    referral\tabs\worklist.py
+    referral\tabs\settings.py
+    referral\tabs\constants.py
+    referral\tabs\__init__.py
+    referral\assets\logo.png
+    referral\assets\report_template.json
+
+--- STEP 2: Verify secrets.toml is intact -------------------------------------
+
+  Read C:\Users\User\Desktop\ris\referral\.streamlit\secrets.toml
+  and confirm it contains ALL of these keys (values may differ):
+    - allowed_emails
+    - [auth] redirect_uri  (must be https://ris.radiology2u.com.au/oauth2callback)
+    - [auth] cookie_secret
+    - [auth.auth0] client_id
+    - [auth.auth0] client_secret
+    - [auth.auth0] server_metadata_url
+
+  Also confirm it does NOT contain a line starting with "storage_root".
+  If storage_root IS present, remove that line before proceeding.
+
+  If any auth keys are missing, STOP and alert the user — do not proceed
+  without valid secrets or the app will be inaccessible.
+
+--- STEP 3: Verify docker/.env is intact --------------------------------------
+
+  Read C:\Users\User\Desktop\ris\referral\docker\.env
+  and confirm it contains a line starting with DATABASE_URL=
+  If it is missing or empty, STOP and alert the user.
+
+--- STEP 4: Verify docker-compose.yml does NOT contain RIS_DEV_MODE -----------
+
+  Read C:\Users\User\Desktop\ris\referral\docker\docker-compose.yml
+  Search for "RIS_DEV_MODE". If found, remove that line.
+  This variable must never be set on the server.
+
+--- STEP 5: Rebuild and restart the Docker container --------------------------
+
+  Run these commands in order from the docker directory:
+
+    cd C:\Users\User\Desktop\ris\referral\docker
+    docker compose down
+    docker compose up -d --build
+
+  Wait for the build to complete. If it fails, show the last 30 lines of output
+  to the user and stop.
+
+--- STEP 6: Verify the container is running -----------------------------------
+
+  Run:
+    docker compose ps
+
+  The service named "ris" (or similar) should show status "Up" or "running".
+  If it is not running, run:
+    docker compose logs --tail=50
+  and show the output to the user.
+
+--- STEP 7: Confirm the app is reachable --------------------------------------
+
+  The app should be accessible at http://localhost:8501
+  Optionally verify with:
+    curl -s -o /dev/null -w "%{http_code}" http://localhost:8501
+
+  Expected response: 200 (or 302 redirect to Auth0 login).
+  If the response is anything else, show the container logs.
+
+--- STEP 8: Report completion -------------------------------------------------
+
+  Tell the user:
+  - Which files were deployed
+  - Whether secrets.toml and .env were untouched
+  - That the DB migrations (performing_clinician column) will run automatically
+    on first startup — no manual SQL is needed
+  - The public URL: https://ris.radiology2u.com.au
+
+================================================================================
+SECTION B — WHAT CHANGED (context for the agent and the human)
+================================================================================
+
+  These are the cumulative changes deployed in the current transfer.
+  The database handles all migrations automatically on first container start.
+
+  APP FILES CHANGED:
+    sheets_db.py          — new column: reports.performing_clinician (auto-migrated)
+                          — new function: delete_document_metadata()
+                          — accession number format changed to YY-NNNN-N-MOD
+                            (e.g. 26-0012-3-US: year / patient seq / visit count / modality)
+                            Old accessions on server keep their format — safe to coexist
+    pdf_generator.py      — purple branded radiology report PDF
+                          — branding now loaded from referral/assets/ (not gen/)
+                          — performing clinician in signature block
+                          — removed Medicare No, Accession No, provider block, footer
+    local_storage.py      — new function: delete_document()
+    tabs/worklist.py      — side-by-side radiologist layout (reference panel + report form)
+                          — delete buttons on all document viewers (two-step confirm)
+                          — performing clinician field in report form
+    tabs/patient_search.py — delete buttons on document viewer
+                           — removed "Referred To (Facility / Department)" field
+                           — clinical urgency defaults to Routine
+                           — valid until: auto-computed (order date + 12 months, DD/MM/YYYY)
+                           — order date picker format DD/MM/YYYY
+
+  NEW ASSET FILES (must exist on server — create referral\assets\ if missing):
+    assets/logo.png             — clinic logo for PDF report header
+    assets/report_template.json — clinic branding (name, address, phone, disclaimer)
+
+  FILES NOT CHANGED (do not need to be re-transferred):
+    referral.py           — unchanged this session (but safe to transfer if included)
+    tabs/settings.py      — unchanged
+    tabs/constants.py     — unchanged
+    tabs/__init__.py      — unchanged
+    docker/docker-compose.yml  — unchanged
+    docker/Dockerfile          — unchanged
+
+  DB MIGRATIONS (automatic, no manual action needed):
+    reports table: ALTER TABLE reports ADD COLUMN IF NOT EXISTS performing_clinician TEXT
+    This runs inside init_db() on every startup and is a no-op if the column exists.
+
+================================================================================
+SECTION C — WHAT NEVER GOES TO THE SERVER
+================================================================================
+
+  .streamlit/secrets.toml   — server has its own with production credentials
+  docker/.env               — server has its own with Supabase DATABASE_URL
+  ris_database.db           — server uses Supabase PostgreSQL, not SQLite
+  ris_storage/              — server uses a Docker volume, not a local folder
+  .venv/                    — server runs inside Docker, no venv needed
+
+================================================================================
+SECTION D — RUNNING ON DEV PC
+================================================================================
+
+  cd /home/kali/Desktop/ris/referral
+  source .venv/bin/activate
+  RIS_DEV_MODE=1 streamlit run referral.py
+
+  - Auth0 login is bypassed (DEV_MODE only, never set on server)
+  - Files stored in referral/ris_storage/ (auto-created)
+  - secrets.toml storage_root line is dev-only — strip it before any server transfer
+
+================================================================================
+SECTION E — INFRASTRUCTURE REFERENCE
+================================================================================
+
+  Server OS:          Windows
+  Docker compose:     C:\Users\User\Desktop\ris\referral\docker\
+  Cloudflare Tunnel:  config at C:\Users\User\.cloudflared\config.yml
+  Public URL:         https://ris.radiology2u.com.au
+  Database:           Supabase PostgreSQL (cloud, always on)
+  File storage:       Docker volume ris_storage (local to server)
+  Auth:               Auth0 (radiology2u.au.auth0.com)
+
+  To restart the Cloudflare tunnel if needed:
+    Stop-Process -Name cloudflared -Force
+    cloudflared tunnel --config C:\Users\User\.cloudflared\config.yml run pacs
+
+================================================================================
+SECTION F — CHANGE LOG
+================================================================================
+
+  2026-05-02  Session 2:
+              - PDF branding redesign, performing clinician, delete buttons,
+                side-by-side radiologist layout, accession format change,
+                new visit form cleanup, valid until auto-compute, assets folder
+
+  2026-05-02  Session 1:
+              - Dev venv, DEV_MODE bypass, demographics layout, DOB format,
+                document upload/preview, document categories, radiology report
+                panel (findings/impression/conclusion), generate_report_pdf(),
+                reports table in DB
+
+================================================================================

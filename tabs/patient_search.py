@@ -16,7 +16,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from local_storage import is_local_storage_configured, upload_document
+from local_storage import is_local_storage_configured, upload_document, download_document, delete_document
 from pdf_generator import generate_referral_pdf
 from sheets_db import (
     create_referral,
@@ -30,6 +30,7 @@ from sheets_db import (
     get_referral_by_id,
     register_patient,
     save_document_metadata,
+    delete_document_metadata,
     search_patients,
     update_patient,
     update_referral,
@@ -161,18 +162,9 @@ def _visit_step1(mid: str) -> None:
     )
 
     today = date.today()
-    try:
-        default_valid = today.replace(year=today.year + 1)
-    except ValueError:
-        default_valid = today.replace(year=today.year + 1, day=28)
 
     o1, o2 = st.columns(2)
     with o1:
-        st.text_input(
-            "Referred To (Facility / Department) *",
-            placeholder="e.g. Radiology2u — Mobile Ultrasound",
-            key="nv_clinic",
-        )
         st.selectbox("Imaging Modality *", ALL_MODALITIES, key="nv_modality")
         st.text_input(
             "Body Region / Examination *",
@@ -180,10 +172,26 @@ def _visit_step1(mid: str) -> None:
             key="nv_body",
         )
     with o2:
-        st.selectbox("Clinical Urgency *", ALL_URGENCIES[::-1], key="nv_urgency")
-        st.date_input("Order Date *", value=today, key="nv_date")
-        st.date_input("Valid Until (default 12 months)", value=default_valid,
-                      key="nv_valid")
+        _urgency_opts = ALL_URGENCIES[::-1]
+        st.selectbox(
+            "Clinical Urgency *",
+            _urgency_opts,
+            index=_urgency_opts.index("Routine"),
+            key="nv_urgency",
+        )
+        st.date_input("Order Date *", value=today, format="DD/MM/YYYY", key="nv_date")
+        _order_date = st.session_state.get("nv_date", today)
+        try:
+            _auto_valid = _order_date.replace(year=_order_date.year + 1)
+        except ValueError:
+            _auto_valid = _order_date.replace(year=_order_date.year + 1, day=28)
+        st.session_state["nv_valid_display"] = _auto_valid.strftime("%d/%m/%Y")
+        st.text_input(
+            "Valid Until (auto — 12 months from order date)",
+            value=st.session_state["nv_valid_display"],
+            disabled=True,
+            key="nv_valid_display",
+        )
 
     st.text_area(
         "Clinical Indication / Reason for Referral *",
@@ -244,16 +252,84 @@ def _visit_step3(mid: str, pat: dict) -> None:
 
     # ── Upload section ────────────────────────────────────────────────────────
     with st.expander("📎 Upload Existing Documents", expanded=False):
+        _DOC_CATEGORIES = {
+            "Supporting Document":  "supporting_document",
+            "Sonographer Worksheet": "worksheet",
+            "Prior Imaging Report":  "prior_report",
+            "Referral Letter":       "referral_letter",
+        }
+        up_cat_label = st.selectbox(
+            "Document Category",
+            list(_DOC_CATEGORIES.keys()),
+            key="nv_up_cat",
+        )
+        up_category = _DOC_CATEGORIES[up_cat_label]
+
         uploaded = st.file_uploader(
-            "Upload referral letter, prior imaging reports, or other documents",
+            "Select file(s) to upload",
             accept_multiple_files=True,
             type=["pdf", "jpg", "jpeg", "png", "doc", "docx"],
             key="nv_uploads",
         )
         if uploaded:
-            st.success(f"{len(uploaded)} file(s) selected and ready to upload on save.")
             for uf in uploaded:
                 st.caption(f"📄 {uf.name}  ({round(uf.size / 1024, 1)} KB)")
+
+            # If a visit is already created, offer immediate upload
+            if st.session_state.get("nv_pdf_bytes"):
+                _acc      = st.session_state["nv_accession"]
+                _ref_id   = st.session_state.get("nv_referral_id", "")
+                _pat_id   = st.session_state.get("nv_patient_id", pat.get("patient_id", ""))
+                _pat_name = f"{pat.get('firstname', '')} {pat.get('lastname', '')}".strip()
+                if st.button("📎 Upload to This Visit", use_container_width=True,
+                             key="nv_upload_extra"):
+                    _errors: list[str] = []
+                    for uf in uploaded:
+                        try:
+                            if is_local_storage_configured():
+                                up = upload_document(
+                                    file_bytes=uf.getvalue(),
+                                    filename=uf.name,
+                                    mime_type=getattr(uf, "type", "application/octet-stream"),
+                                    patient_id=_pat_id,
+                                    patient_name=_pat_name,
+                                    accession_number=_acc,
+                                    category=up_category,
+                                )
+                                save_document_metadata({
+                                    "referral_id":      _ref_id,
+                                    "medicare":         mid,
+                                    "accession_number": _acc,
+                                    "file_name":        up.get("name", uf.name),
+                                    "mime_type":        up.get("mimeType", getattr(uf, "type", "application/octet-stream")),
+                                    "file_size_bytes":  int(up.get("size", uf.size)),
+                                    "category":         up_category,
+                                    "storage_file_id":  up.get("id", ""),
+                                    "storage_url":      up.get("webViewLink", ""),
+                                })
+                            else:
+                                save_document_metadata({
+                                    "referral_id":      _ref_id,
+                                    "medicare":         mid,
+                                    "accession_number": _acc,
+                                    "file_name":        uf.name,
+                                    "mime_type":        getattr(uf, "type", "application/octet-stream"),
+                                    "file_size_bytes":  uf.size,
+                                    "category":         up_category,
+                                    "storage_file_id":  "",
+                                    "storage_url":      "",
+                                })
+                        except Exception as ex:
+                            _errors.append(f"{uf.name}: {ex}")
+                    if _errors:
+                        st.warning("Some files failed to upload:")
+                        for err in _errors:
+                            st.caption(f"- {err}")
+                    else:
+                        st.success(f"{len(uploaded)} file(s) uploaded to accession {_acc}.")
+            else:
+                st.caption("Files will be saved when you create the visit below.")
+
         if not is_local_storage_configured():
             st.warning(
                 "⚠️ Local document storage is not configured. "
@@ -276,7 +352,10 @@ def _visit_step3(mid: str, pat: dict) -> None:
     nv_body       = st.session_state.get("nv_body", "").strip()
     nv_urgency    = st.session_state.get("nv_urgency", "")
     nv_date       = st.session_state.get("nv_date", date.today())
-    nv_valid      = st.session_state.get("nv_valid", date.today())
+    try:
+        nv_valid  = nv_date.replace(year=nv_date.year + 1)
+    except ValueError:
+        nv_valid  = nv_date.replace(year=nv_date.year + 1, day=28)
     nv_indication = st.session_state.get("nv_indication", "").strip()
     nv_history    = st.session_state.get("nv_history", "").strip()
     nv_meds       = st.session_state.get("nv_meds", "").strip()
@@ -318,7 +397,6 @@ def _visit_step3(mid: str, pat: dict) -> None:
         if st.button("📄 Generate Referral & Save Visit", type="primary",
                      use_container_width=True, key="nv_generate"):
             required = {
-                "Referred-to facility":         nv_clinic,
                 "Body region / examination":     nv_body,
                 "Clinical indication":           nv_indication,
                 "Referring doctor first name":   dr_fn,
@@ -445,7 +523,7 @@ def _visit_step3(mid: str, pat: dict) -> None:
                                     patient_id=patient_id,
                                     patient_name=patient_name,
                                     accession_number=accession,
-                                    category="supporting_document",
+                                    category=up_category,
                                 )
                                 save_document_metadata({
                                     "referral_id": referral_id,
@@ -454,7 +532,7 @@ def _visit_step3(mid: str, pat: dict) -> None:
                                     "file_name": up.get("name", uf.name),
                                     "mime_type": up.get("mimeType", getattr(uf, "type", "application/octet-stream")),
                                     "file_size_bytes": int(up.get("size", uf.size)),
-                                    "category": "supporting_document",
+                                    "category": up_category,
                                     "storage_file_id": up.get("id", ""),
                                     "storage_url": up.get("webViewLink", ""),
                                 })
@@ -466,7 +544,7 @@ def _visit_step3(mid: str, pat: dict) -> None:
                                     "file_name": uf.name,
                                     "mime_type": getattr(uf, "type", "application/octet-stream"),
                                     "file_size_bytes": uf.size,
-                                    "category": "supporting_document",
+                                    "category": up_category,
                                     "storage_file_id": "",
                                     "storage_url": "",
                                 })
@@ -478,6 +556,8 @@ def _visit_step3(mid: str, pat: dict) -> None:
 
                 st.session_state["nv_pdf_bytes"]    = pdf_bytes
                 st.session_state["nv_accession"]    = accession
+                st.session_state["nv_referral_id"]  = referral_id
+                st.session_state["nv_patient_id"]   = patient_id
                 st.session_state["nv_pt_lastname"]  = pat.get("lastname", "")
                 st.session_state["nv_pt_firstname"] = pat.get("firstname", "")
                 st.rerun()
@@ -612,71 +692,101 @@ def render(cfg: dict | None = None) -> None:
         st.markdown('<div class="r2u-section">Patient Demographics</div>',
                     unsafe_allow_html=True)
 
-        r1, r2 = st.columns(2)
-        with r1:
-            rp_medicare = st.text_input(
-                "Medicare Number *", placeholder="1234 56789 0", key="rp_medicare"
-            )
-            rp_irn = st.number_input(
-                "IRN (Individual Reference Number)", min_value=1, max_value=9,
-                value=1, step=1, key="rp_irn"
-            )
-            rp_medicare_expiry = st.text_input(
-                "Medicare Expiry (MM/YYYY)", placeholder="01/2028", key="rp_mex"
-            )
-            rp_dva = st.text_input("DVA File Number (if applicable)", key="rp_dva")
-            rp_concession = st.text_input(
-                "Concession / Health Care Card No.", key="rp_conc"
-            )
-            rp_ihi = st.text_input(
-                "IHI — Individual Healthcare Identifier",
-                placeholder="8003608000000000", key="rp_ihi"
-            )
-        with r2:
-            rp_lastname  = st.text_input("Surname *", key="rp_ln")
+        # ── Row 1: Personal details (4 cols) ──────────────────────────────────
+        p1, p2, p3, p4 = st.columns(4)
+        with p1:
             rp_firstname = st.text_input("First Name *", key="rp_fn")
+        with p2:
+            rp_lastname  = st.text_input("Surname *", key="rp_ln")
+        with p3:
             rp_dob = st.date_input(
                 "Date of Birth *",
+                value=None,
                 min_value=date(1900, 1, 1),
                 max_value=date.today(),
+                format="DD/MM/YYYY",
                 key="rp_dob",
             )
+        with p4:
             rp_gender = st.selectbox("Gender", _GENDERS, key="rp_gender")
+
+        # ── Row 2: Extra demographics (3 cols) ────────────────────────────────
+        d1, d2, d3 = st.columns(3)
+        with d1:
             rp_indigenous = st.selectbox(
                 "Aboriginal / Torres Strait Islander Status",
                 _INDIGENOUS, key="rp_indigenous"
             )
-
-        r3, r4 = st.columns(2)
-        with r3:
-            rp_address = st.text_input(
-                "Home Address", placeholder="1 Example St", key="rp_addr"
-            )
-            rp_suburb = st.text_input("Suburb", key="rp_sub")
-        with r4:
-            rp_state    = st.selectbox("State / Territory", STATES, key="rp_state")
-            rp_postcode = st.text_input("Postcode", max_chars=4, key="rp_pc")
-            rp_phone    = st.text_input("Phone", placeholder="0400 000 000",
-                                        key="rp_ph")
-            rp_email    = st.text_input("Email", placeholder="patient@email.com",
-                                        key="rp_email")
-
-        r5, r6 = st.columns(2)
-        with r5:
+        with d2:
             rp_interpreter = st.selectbox(
                 "Interpreter Required?", _INTERPRETER, key="rp_interp"
             )
-        with r6:
+        with d3:
             rp_language = st.text_input(
                 "Language (if interpreter needed)", key="rp_lang"
             )
+
+        # ── Medicare details ───────────────────────────────────────────────────
+        st.markdown('<div class="r2u-section">Medicare &amp; Funding</div>',
+                    unsafe_allow_html=True)
+
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            rp_medicare = st.text_input(
+                "Medicare Number *", placeholder="1234 56789 0", key="rp_medicare"
+            )
+        with m2:
+            rp_irn = st.number_input(
+                "IRN", min_value=1, max_value=9, value=1, step=1, key="rp_irn"
+            )
+        with m3:
+            rp_medicare_expiry = st.text_input(
+                "Expiry (MM/YYYY)", placeholder="01/2028", key="rp_mex"
+            )
+
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            rp_dva = st.text_input("DVA File Number", key="rp_dva")
+        with f2:
+            rp_concession = st.text_input(
+                "Concession / Health Care Card No.", key="rp_conc"
+            )
+        with f3:
+            rp_ihi = st.text_input(
+                "IHI — Individual Healthcare Identifier",
+                placeholder="8003608000000000", key="rp_ihi"
+            )
+
+        # ── Contact details ────────────────────────────────────────────────────
+        st.markdown('<div class="r2u-section">Contact</div>',
+                    unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            rp_phone = st.text_input("Phone / Mobile", placeholder="0400 000 000",
+                                     key="rp_ph")
+        with c2:
+            rp_email = st.text_input("Email", placeholder="patient@email.com",
+                                     key="rp_email")
+
+        a1, a2, a3, a4 = st.columns([3, 2, 1, 1])
+        with a1:
+            rp_address = st.text_input(
+                "Street Address", placeholder="1 Example St", key="rp_addr"
+            )
+        with a2:
+            rp_suburb = st.text_input("Suburb", key="rp_sub")
+        with a3:
+            rp_state    = st.selectbox("State", STATES, key="rp_state")
+        with a4:
+            rp_postcode = st.text_input("Postcode", max_chars=4, key="rp_pc")
 
         st.markdown("---")
         if st.button("💾 Register Patient", type="primary",
                      use_container_width=True, key="btn_reg_patient"):
             medicare_clean = rp_medicare.replace(" ", "")
-            if not medicare_clean or not rp_lastname.strip() or not rp_firstname.strip():
-                st.error("Medicare number, surname, and first name are required.")
+            if not medicare_clean or not rp_lastname.strip() or not rp_firstname.strip() or rp_dob is None:
+                st.error("Medicare number, surname, first name, and date of birth are required.")
             else:
                 pid = register_patient({
                     "medicare":        rp_medicare.strip(),
@@ -965,16 +1075,86 @@ def render(cfg: dict | None = None) -> None:
                             )
                             docs = get_documents_for_referral(rid)
                             if docs:
-                                for doc in docs:
-                                    doc_name = doc.get("file_name", "Document")
-                                    doc_link = doc.get("storage_url", "")
-                                    if doc_link:
-                                        st.markdown(
-                                            f"- 📎 [{doc_name}]({doc_link})",
-                                            unsafe_allow_html=False,
+                                doc_label = f"📎 {len(docs)} document(s) attached"
+                                with st.expander(doc_label, expanded=False):
+                                    _CAT = {
+                                        "referral_pdf":        ("📄", "Referral PDF"),
+                                        "final_report":        ("📋", "Final Report"),
+                                        "worksheet":           ("🔬", "Sonographer Worksheet"),
+                                        "prior_report":        ("📑", "Prior Imaging Report"),
+                                        "referral_letter":     ("✉️",  "Referral Letter"),
+                                        "supporting_document": ("📎", "Supporting Document"),
+                                    }
+                                    for i, doc in enumerate(docs):
+                                        fname   = doc.get("file_name", "Document")
+                                        fid     = doc.get("storage_file_id", "")
+                                        mime    = doc.get("mime_type", "")
+                                        size_kb = round(int(doc.get("file_size_bytes") or 0) / 1024, 1)
+                                        cat_icon, cat_label = _CAT.get(
+                                            doc.get("category", ""), ("📎", "Document")
                                         )
-                                    else:
-                                        st.caption(f"📎 {doc_name}")
+                                        dc1, dc2 = st.columns([5, 2])
+                                        with dc1:
+                                            st.markdown(
+                                                f"{cat_icon} **{fname}** &nbsp; `{size_kb} KB` &nbsp; "
+                                                f"<span style='color:gray;font-size:0.8rem'>{cat_label}</span>",
+                                                unsafe_allow_html=True,
+                                            )
+                                        ps_confirm_key = f"psdel_confirm_{rid}_{i}"
+                                        if fid:
+                                            file_bytes = download_document(fid)
+                                            if file_bytes:
+                                                with dc2:
+                                                    dl_col, del_col = st.columns(2)
+                                                    with dl_col:
+                                                        st.download_button(
+                                                            label="⬇️",
+                                                            data=file_bytes,
+                                                            file_name=fname,
+                                                            mime=mime or "application/octet-stream",
+                                                            use_container_width=True,
+                                                            key=f"psdl_{rid}_{i}",
+                                                        )
+                                                    with del_col:
+                                                        if not st.session_state.get(ps_confirm_key):
+                                                            if st.button("🗑️", key=f"psdel_{rid}_{i}",
+                                                                         use_container_width=True,
+                                                                         help="Delete this file"):
+                                                                st.session_state[ps_confirm_key] = True
+                                                                st.rerun()
+                                                        else:
+                                                            if st.button("⚠️ Confirm",
+                                                                         key=f"psdelok_{rid}_{i}",
+                                                                         use_container_width=True,
+                                                                         type="primary"):
+                                                                delete_document(fid)
+                                                                doc_id = doc.get("document_id", "")
+                                                                if doc_id:
+                                                                    delete_document_metadata(doc_id)
+                                                                st.session_state.pop(ps_confirm_key, None)
+                                                                st.rerun()
+                                                            if st.button("Cancel",
+                                                                         key=f"psdelcancel_{rid}_{i}",
+                                                                         use_container_width=True):
+                                                                st.session_state.pop(ps_confirm_key, None)
+                                                                st.rerun()
+                                                if mime and mime.startswith("image/"):
+                                                    st.image(file_bytes, caption=fname, width=600)
+                                                elif mime == "application/pdf":
+                                                    import base64
+                                                    b64 = base64.b64encode(file_bytes).decode()
+                                                    st.markdown(
+                                                        f'<iframe src="data:application/pdf;base64,{b64}" '
+                                                        f'width="100%" height="500px" style="border:1px solid #ddd;'
+                                                        f'border-radius:6px;"></iframe>',
+                                                        unsafe_allow_html=True,
+                                                    )
+                                            else:
+                                                with dc2:
+                                                    st.caption("Not found on disk")
+                                        else:
+                                            with dc2:
+                                                st.caption("No file stored")
                         with hc2:
                             if st.button("✏️ Edit", key=f"edit_visit_{rid}",
                                          use_container_width=True):

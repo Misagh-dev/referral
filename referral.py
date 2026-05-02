@@ -18,6 +18,9 @@ import streamlit as st
 
 from tabs import patient_search, settings, worklist
 
+# ── Dev mode: bypass auth when running on localhost ────────────────────────────
+_DEV_MODE = os.environ.get("RIS_DEV_MODE", "").lower() in ("1", "true", "yes")
+
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Radiology2u — RIS",
@@ -74,7 +77,7 @@ def _user_email() -> str:
     return ""
 
 # ── Authentication gate ───────────────────────────────────────────────────────
-if not _is_logged_in():
+if not _DEV_MODE and not _is_logged_in():
     st.markdown("""
     <style>
         .login-card {
@@ -115,7 +118,7 @@ if not _is_logged_in():
 
 # ── Authorisation check ───────────────────────────────────────────────────────
 ALLOWED_EMAILS = st.secrets.get("allowed_emails", [])
-if ALLOWED_EMAILS and _user_email() not in ALLOWED_EMAILS:
+if not _DEV_MODE and ALLOWED_EMAILS and _user_email() not in ALLOWED_EMAILS:
     st.error("⛔ Access denied. Your account is not authorised to use this application.")
     st.caption(f"Signed in as: {_user_email() or 'unknown'}")
     st.button("Sign out", on_click=st.logout)

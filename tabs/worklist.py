@@ -9,7 +9,15 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from sheets_db import get_referral_by_id, get_worklist, update_referral, update_referral_status
+from sheets_db import (
+    get_documents_for_referral, get_referral_by_id, get_worklist,
+    save_report, get_report_by_referral,
+    update_referral, update_referral_status,
+    delete_document_metadata,
+)
+from local_storage import download_document, upload_document, delete_document
+from pdf_generator import generate_report_pdf
+from sheets_db import save_document_metadata
 from tabs.constants import (
     ALL_MODALITIES,
     ALL_STATUSES,
@@ -20,6 +28,92 @@ from tabs.constants import (
 
 _ACTIVE_STATUSES  = ["Pending", "Scheduled", "In Progress"]
 _HISTORY_STATUSES = ["Reported", "Cancelled"]
+
+_CATEGORY_LABEL = {
+    "referral_pdf":       ("📄", "Referral PDF"),
+    "final_report":       ("📋", "Final Report"),
+    "worksheet":          ("🔬", "Sonographer Worksheet"),
+    "prior_report":       ("📑", "Prior Imaging Report"),
+    "referral_letter":    ("✉️",  "Referral Letter"),
+    "supporting_document":("📎", "Supporting Document"),
+}
+
+
+def _render_documents(referral_id: str, key_suffix: str) -> None:
+    """Expander showing all attached documents with download/preview/delete."""
+    docs = get_documents_for_referral(referral_id)
+    label = f"📎 Documents ({len(docs)})" if docs else "📎 Documents (none)"
+    with st.expander(label, expanded=False):
+        if not docs:
+            st.caption("No documents attached to this study.")
+            return
+        for i, doc in enumerate(docs):
+            fname    = doc.get("file_name", "Document")
+            fid      = doc.get("storage_file_id", "")
+            mime     = doc.get("mime_type", "")
+            category = doc.get("category", "")
+            doc_id   = doc.get("document_id", "")
+            size_kb  = round(int(doc.get("file_size_bytes") or 0) / 1024, 1)
+            cat_icon, cat_label = _CATEGORY_LABEL.get(category, ("📎", category.replace("_", " ").title()))
+
+            col_info, col_dl, col_del = st.columns([5, 1.5, 1.5])
+            with col_info:
+                st.markdown(f"{cat_icon} **{fname}** &nbsp; `{size_kb} KB` &nbsp; "
+                            f"<span style='color:gray;font-size:0.8rem'>{cat_label}</span>",
+                            unsafe_allow_html=True)
+
+            confirm_key = f"del_confirm_{key_suffix}_{referral_id}_{i}"
+
+            if fid:
+                file_bytes = download_document(fid)
+                if file_bytes:
+                    with col_dl:
+                        st.download_button(
+                            label="⬇️",
+                            data=file_bytes,
+                            file_name=fname,
+                            mime=mime or "application/octet-stream",
+                            use_container_width=True,
+                            key=f"dl_{key_suffix}_{referral_id}_{i}",
+                        )
+                    if mime and mime.startswith("image/"):
+                        st.image(file_bytes, caption=fname, width=600)
+                    elif mime == "application/pdf":
+                        import base64
+                        b64 = base64.b64encode(file_bytes).decode()
+                        st.markdown(
+                            f'<iframe src="data:application/pdf;base64,{b64}" '
+                            f'width="100%" height="500px" style="border:1px solid #ddd;'
+                            f'border-radius:6px;"></iframe>',
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    with col_dl:
+                        st.caption("Not found")
+            else:
+                with col_dl:
+                    st.caption("No file")
+
+            # Delete with one-click confirm
+            with col_del:
+                if not st.session_state.get(confirm_key):
+                    if st.button("🗑️", key=f"del_{key_suffix}_{referral_id}_{i}",
+                                 use_container_width=True, help="Delete this file"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+                else:
+                    if st.button("⚠️ Confirm", key=f"delok_{key_suffix}_{referral_id}_{i}",
+                                 use_container_width=True, type="primary"):
+                        if fid:
+                            delete_document(fid)
+                        if doc_id:
+                            delete_document_metadata(doc_id)
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
+                    if st.button("Cancel", key=f"delcancel_{key_suffix}_{referral_id}_{i}",
+                                 use_container_width=True):
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
 
 
 def _detail_panel(rec: dict, ks: str, tbl_ver_key: str, sel_acc_key: str) -> None:
@@ -54,17 +148,6 @@ def _detail_panel(rec: dict, ks: str, tbl_ver_key: str, sel_acc_key: str) -> Non
 
     if rec.get("allergies"):
         st.error(f"⚠️ **Allergies / ADR:** {rec['allergies']}")
-
-    with st.expander("Clinical Details"):
-        st.markdown(f"**Clinical Indication:**\n\n{rec.get('clinical_indication','—')}")
-        if rec.get("relevant_history"):
-            st.markdown(f"**History:** {rec['relevant_history']}")
-        if rec.get("medications"):
-            st.markdown(f"**Medications:** {rec['medications']}")
-        if rec.get("investigations"):
-            st.markdown(f"**Investigations Done:** {rec['investigations']}")
-        if rec.get("special_requirements"):
-            st.markdown(f"**Special Requirements:** {rec['special_requirements']}")
 
     st.markdown("**Update Order Status:**")
     ns_col, sv_col = st.columns([3, 1])
@@ -157,6 +240,265 @@ def _detail_panel(rec: dict, ks: str, tbl_ver_key: str, sel_acc_key: str) -> Non
             st.success("✅ Order updated.")
             st.session_state[tbl_ver_key] += 1
             st.rerun()
+
+    # ── Side-by-side: reference (left) + reporting (right) ───────────────────
+    rid          = rec["referral_id"]
+    acc          = rec.get("accession_number", rid)
+    existing_rpt = get_report_by_referral(rid)
+
+    # Load report defaults once outside the columns to avoid widget-key issues
+    default_findings        = (existing_rpt or {}).get("findings", "")
+    default_impression      = (existing_rpt or {}).get("impression", "")
+    default_conclusion      = (existing_rpt or {}).get("conclusion", "")
+    default_radiologist     = (existing_rpt or {}).get("radiologist", "")
+    default_status          = (existing_rpt or {}).get("status", "Draft")
+    default_perf_clinician  = (existing_rpt or {}).get("performing_clinician", "")
+
+    st.markdown("---")
+    ref_col, rpt_col = st.columns([11, 10], gap="large")
+
+    # ── LEFT: Reference panel — clinical summary + documents ─────────────────
+    with ref_col:
+        st.markdown(
+            "<span style='font-weight:600;font-size:1rem;color:#3a1c71'>"
+            "📂 Reference — Clinical &amp; Documents</span>",
+            unsafe_allow_html=True,
+        )
+        with st.container(height=680, border=True):
+            if rec.get("clinical_indication"):
+                st.markdown("**🩺 Clinical Indication**")
+                st.info(rec["clinical_indication"])
+            for _field, _label in [
+                ("relevant_history",    "Relevant History"),
+                ("medications",         "Medications"),
+                ("investigations",      "Investigations Done"),
+                ("special_requirements","Special Requirements"),
+            ]:
+                if rec.get(_field):
+                    st.markdown(f"**{_label}:** {rec[_field]}")
+            if rec.get("allergies"):
+                st.error(f"⚠️ **Allergies / ADR:** {rec['allergies']}")
+
+            docs = get_documents_for_referral(rid)
+            st.markdown("---")
+            st.markdown(f"**Attached Documents** ({len(docs)})")
+            if not docs:
+                st.caption("No documents attached to this study yet.")
+            else:
+                for i, doc in enumerate(docs):
+                    fname    = doc.get("file_name", "Document")
+                    fid      = doc.get("storage_file_id", "")
+                    mime     = doc.get("mime_type", "")
+                    category = doc.get("category", "")
+                    doc_id   = doc.get("document_id", "")
+                    size_kb  = round(int(doc.get("file_size_bytes") or 0) / 1024, 1)
+                    cat_icon, cat_label = _CATEGORY_LABEL.get(
+                        category, ("📎", category.replace("_", " ").title())
+                    )
+                    col_info, col_btn, col_del = st.columns([5, 1.5, 1.5])
+                    with col_info:
+                        st.markdown(
+                            f"{cat_icon} **{fname}** &nbsp; `{size_kb} KB` &nbsp; "
+                            f"<span style='color:gray;font-size:0.8rem'>{cat_label}</span>",
+                            unsafe_allow_html=True,
+                        )
+
+                    confirm_key = f"ref_del_confirm_{ks}_{rid}_{i}"
+
+                    if fid:
+                        file_bytes = download_document(fid)
+                        if file_bytes:
+                            with col_btn:
+                                st.download_button(
+                                    label="⬇️",
+                                    data=file_bytes,
+                                    file_name=fname,
+                                    mime=mime or "application/octet-stream",
+                                    use_container_width=True,
+                                    key=f"ref_dl_{ks}_{rid}_{i}",
+                                )
+                            if mime == "application/pdf":
+                                import base64
+                                b64 = base64.b64encode(file_bytes).decode()
+                                st.markdown(
+                                    f'<iframe src="data:application/pdf;base64,{b64}" '
+                                    f'width="100%" height="480px" style="border:1px solid #ddd;'
+                                    f'border-radius:6px;margin-top:4px"></iframe>',
+                                    unsafe_allow_html=True,
+                                )
+                            elif mime and mime.startswith("image/"):
+                                st.image(file_bytes, caption=fname, use_container_width=True)
+                        else:
+                            with col_btn:
+                                st.caption("Not found")
+                    else:
+                        with col_btn:
+                            st.caption("No file")
+
+                    with col_del:
+                        if not st.session_state.get(confirm_key):
+                            if st.button("🗑️", key=f"ref_del_{ks}_{rid}_{i}",
+                                         use_container_width=True, help="Delete this file"):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
+                        else:
+                            if st.button("⚠️ Confirm", key=f"ref_delok_{ks}_{rid}_{i}",
+                                         use_container_width=True, type="primary"):
+                                if fid:
+                                    delete_document(fid)
+                                if doc_id:
+                                    delete_document_metadata(doc_id)
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                            if st.button("Cancel", key=f"ref_delcancel_{ks}_{rid}_{i}",
+                                         use_container_width=True):
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+
+    # ── RIGHT: Report form ────────────────────────────────────────────────────
+    with rpt_col:
+        st.markdown(
+            "<span style='font-weight:600;font-size:1rem;color:#3a1c71'>"
+            "📝 Radiology Report</span>",
+            unsafe_allow_html=True,
+        )
+        with st.container(height=680, border=True):
+            rpt_status = st.selectbox(
+                "Report Status",
+                ["Draft", "Preliminary", "Final"],
+                index=["Draft", "Preliminary", "Final"].index(default_status)
+                      if default_status in ["Draft", "Preliminary", "Final"] else 0,
+                key=f"rpt_status_{rid}",
+            )
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                rpt_radiologist = st.text_input(
+                    "Reporting Radiologist",
+                    value=default_radiologist,
+                    placeholder="Dr Firstname Lastname",
+                    key=f"rpt_rad_{rid}",
+                )
+            with rc2:
+                rpt_perf_clinician = st.text_input(
+                    "Performing Clinician",
+                    value=default_perf_clinician,
+                    placeholder="Sonographer name",
+                    key=f"rpt_perf_{rid}",
+                )
+
+            rpt_findings = st.text_area(
+                "Findings",
+                value=default_findings,
+                height=180,
+                placeholder="Describe the imaging findings in detail...",
+                key=f"rpt_find_{rid}",
+            )
+            rpt_impression = st.text_area(
+                "Impression",
+                value=default_impression,
+                height=110,
+                placeholder="Summarise the key diagnostic impression...",
+                key=f"rpt_imp_{rid}",
+            )
+            rpt_conclusion = st.text_area(
+                "Conclusion / Recommendation",
+                value=default_conclusion,
+                height=80,
+                placeholder="Recommended follow-up or clinical action...",
+                key=f"rpt_conc_{rid}",
+            )
+
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                if st.button("💾 Save Report (Draft)", use_container_width=True,
+                             key=f"rpt_save_{rid}"):
+                    save_report({
+                        "referral_id":          rid,
+                        "accession_number":     acc,
+                        "medicare":             rec.get("medicare", ""),
+                        "findings":             rpt_findings.strip(),
+                        "impression":           rpt_impression.strip(),
+                        "conclusion":           rpt_conclusion.strip(),
+                        "radiologist":          rpt_radiologist.strip(),
+                        "performing_clinician": rpt_perf_clinician.strip(),
+                        "status":               rpt_status,
+                    })
+                    st.success("Report saved.")
+                    st.rerun()
+
+            with bc2:
+                if st.button("✅ Finalise & Generate PDF", type="primary",
+                             use_container_width=True, key=f"rpt_finalise_{rid}"):
+                    if not rpt_findings.strip() and not rpt_impression.strip():
+                        st.error("Findings or Impression are required before finalising.")
+                    else:
+                        save_report({
+                            "referral_id":          rid,
+                            "accession_number":     acc,
+                            "medicare":             rec.get("medicare", ""),
+                            "findings":             rpt_findings.strip(),
+                            "impression":           rpt_impression.strip(),
+                            "conclusion":           rpt_conclusion.strip(),
+                            "radiologist":          rpt_radiologist.strip(),
+                            "performing_clinician": rpt_perf_clinician.strip(),
+                            "status":               "Final",
+                        })
+                        from sheets_db import find_patient_by_medicare
+                        pat = find_patient_by_medicare(rec.get("medicare", "")) or {}
+                        rpt_dict = {
+                            "findings":             rpt_findings.strip(),
+                            "impression":           rpt_impression.strip(),
+                            "conclusion":           rpt_conclusion.strip(),
+                            "radiologist":          rpt_radiologist.strip(),
+                            "performing_clinician": rpt_perf_clinician.strip(),
+                            "status":               "Final",
+                        }
+                        pdf_bytes = generate_report_pdf(pat, rec, rpt_dict)
+                        pdf_name  = f"RPT_{acc}_{rec.get('lastname','')}.pdf"
+
+                        from local_storage import is_local_storage_configured
+                        patient_id   = pat.get("patient_id", rec.get("medicare", ""))
+                        patient_name = f"{pat.get('firstname','')} {pat.get('lastname','')}".strip()
+                        if is_local_storage_configured():
+                            try:
+                                up = upload_document(
+                                    file_bytes=pdf_bytes,
+                                    filename=pdf_name,
+                                    mime_type="application/pdf",
+                                    patient_id=patient_id,
+                                    patient_name=patient_name,
+                                    accession_number=acc,
+                                    category="final_report",
+                                )
+                                save_document_metadata({
+                                    "referral_id":      rid,
+                                    "medicare":         rec.get("medicare", ""),
+                                    "accession_number": acc,
+                                    "file_name":        up.get("name", pdf_name),
+                                    "mime_type":        "application/pdf",
+                                    "file_size_bytes":  int(up.get("size", len(pdf_bytes))),
+                                    "category":         "final_report",
+                                    "storage_file_id":  up.get("id", ""),
+                                    "storage_url":      up.get("webViewLink", ""),
+                                })
+                            except Exception as ex:
+                                st.warning(f"Report saved but PDF storage failed: {ex}")
+
+                        update_referral_status(rid, "Reported")
+                        st.session_state[f"rpt_pdf_{rid}"] = pdf_bytes
+                        st.session_state[f"rpt_fname_{rid}"] = pdf_name
+                        st.session_state[tbl_ver_key] += 1
+                        st.rerun()
+
+            if st.session_state.get(f"rpt_pdf_{rid}"):
+                st.download_button(
+                    label="⬇️ Download Final Report PDF",
+                    data=st.session_state[f"rpt_pdf_{rid}"],
+                    file_name=st.session_state.get(f"rpt_fname_{rid}", f"RPT_{acc}.pdf"),
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key=f"rpt_dl_{rid}",
+                )
 
 
 def _worklist_section(scope_statuses: list[str], tab_key: str) -> None:

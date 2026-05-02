@@ -1,0 +1,22 @@
+{
+  "clinic_name": "Radiology2U",
+  "clinic_role": "Mobile Ultrasound Services",
+  "clinic_address": "12 Poplar Cres, Bellfield, VIC 3081",
+  "clinic_phone": "Phone: 0455797555",
+  "clinic_email": "Email: info@radiology2u.com.au",
+  "clinic_logo_text": "╔═══════════════════════════════════╗\n║   Radiology2U (R2U)               ║\n╚═══════════════════════════════════╝",
+  "clinician_name": "Mr. Misagh Zamani",
+  "clinician_credentials": "AMS",
+  "Clinician_specialty": "MSK, Vascular, Interventional, General",
+  "doctor_name": "Dr. [Your Name Here]",
+  "doctor_credentials": "MBBS",
+  "accreditation": "Accredited by: Royal Australian and New Zealand College of Radiology (RANZCR)",
+  "disclaimer": "Disclaimer: This ultrasound examination and report were performed and prepared by the performing practitioner at the point of care, based on their clinical assessment and the images obtained. A radiologist may conduct remote review for quality assurance purposes only and is not responsible for the primary acquisition or interpretation unless explicitly stated. This report should be considered alongside the patient's clinical context. For any queries or clarification, please contact the performing practitioner directly.",
+  
+  
+  "_comment_docx": "Settings below are for DOCX reports only",
+  "logo_path": "info/logo.png",
+  "primary_color": [58, 28, 113],
+  "secondary_color": [78, 44, 142],
+  "accent_color": [99, 58, 168]
+}
